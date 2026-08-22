@@ -1,0 +1,68 @@
+
+// dsh-better client-bundle smoke test: materialize the factory with shims and
+// exercise apply() against a fake client context.
+const loaded = [];
+globalThis.window = {
+  localStorage: { getItem: () => null, setItem: () => {}, },
+  Notification: undefined,
+  addEventListener: () => {},
+};
+globalThis.document = { createElement: () => ({ setAttribute(){}, get textContent(){return ""}, set textContent(v){ this._t = v; } }), head: { appendChild(){} } };
+globalThis.__ModuleLoader__ = { load(def) { loaded.push(def) } };
+globalThis.window.__ModuleLoader__ = globalThis.__ModuleLoader__;
+
+class ShimComponent { constructor() {} setState() {} forceUpdate() {} render() { return null; } }
+ShimComponent.isReactComponent = {};
+const reactShim = new Proxy({}, { get: (target, key) => {
+  if (key === "Component") return ShimComponent;
+  if (key === "createElement") return (type, props, ...children) => ({ type, props, children });
+  if (key === "useState") return (init) => [typeof init === "function" ? init() : init, () => {}];
+  if (key === "useEffect") return (fn) => {};
+  if (key === "useCallback") return (fn) => fn;
+  if (key === "useMemo") return (fn) => fn();
+  return () => null;
+}});
+function makeProto() {
+  return {
+    handleMuxEnvelope(env) { return env; },
+    handleHostEnvelope(env) { return env; },
+  };
+}
+const proto = makeProto();
+const sessionsInstance = Object.create(proto);
+sessionsInstance.list = { getSnapshot: () => ({ byId: { s1: { id: "s1", displayTitle: "测试任务", title: "测试任务", origin: undefined, parentId: undefined } } }), subscribe: () => () => {} };
+const registered = [];
+const ctx = {
+  sessions: sessionsInstance,
+  locale: { register: () => () => {}, bind: () => (key) => key },
+  slots: { inject: (name, maker) => { registered.push({ name, entry: maker() }); }, register: (opts, comp) => ({ opts, comp }) },
+  effect: (body, label) => { void body; return () => {}; },
+};
+await import("../lib/client.js");
+if (loaded.length !== 1) throw new Error("bundle did not register exactly one module");
+const mod = loaded[0].factory((spec) => {
+  if (spec === "react") return reactShim;
+  if (spec === "@deepseek-ai/dsh-client-ui-primitives") {
+    const icon = (props) => ({ icon: true, size: props?.size });
+    const fish = (props) => ({ fish: true, size: props?.size });
+    return new Proxy({}, { get: (t, k) => k === "FishLogo" ? fish : icon });
+  }
+  throw new Error("unexpected require: " + spec);
+});
+console.log("factory exports:", Object.keys(mod).join(","));
+mod.apply(ctx);
+console.log("slots.inject calls:", registered.map(r => r.name).join(","));
+const entry = registered[0].entry;
+console.log("section id:", entry.opts.id, "| order:", entry.opts.order, "| label:", entry.opts.label());
+const injected = entry.opts.inject();
+console.log("inject face keys:", Object.keys(injected).join(","));
+if (injected.ctx !== ctx) throw new Error("ctx missing from inject face");
+
+// Frame observation through the WRAPPED prototype
+proto.handleMuxEnvelope({ payload: { type: "question/requested", sessionId: "s1", questions: [{ id: "q1", question: "选择方案", options: [{ label: "方案 A（Recommended）" }, { label: "方案 B" }] }] } });
+proto.handleMuxEnvelope({ payload: { type: "question/resolved", sessionId: "s1", questionRpcId: "x" } });
+proto.handleMuxEnvelope({ payload: { type: "session/event", sessionId: "s1", event: { type: "turn/end", data: { reason: { kind: "completed" } } } } });
+proto.handleHostEnvelope({ payload: { type: "host/session-status", sessionId: "s1", running: true } });
+proto.handleHostEnvelope({ payload: { type: "host/session-status", sessionId: "s1", running: false } });
+proto.handleHostEnvelope({ payload: { type: "host/agent-error", sessionId: "s1", message: "boom: ETEST" } });
+console.log("wrapped dispatch OK (no throws)");
