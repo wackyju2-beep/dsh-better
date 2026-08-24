@@ -1,6 +1,6 @@
 # dsh-better
 
-> **Unofficial community plugin.** Not affiliated with DeepSeek. 非官方社区插件，与 DeepSeek 官方无关。
+> **Unofficial community plugin.** Not affiliated with DeepSeek. 非官方社区插件，与 DeepSeek 官方无关。依靠AI生产的代码。
 
 更好的 DSH —— 一个符合 DeepSeek Harness 插件标准的双半部插件（host + browser），为 dsh Web GUI 增加两组能力：
 
