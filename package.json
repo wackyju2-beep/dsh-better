@@ -1,7 +1,7 @@
 {
   "name": "dsh-better",
-  "description": "Better DSH: archived-session management and task-stop desktop notifications for the dsh web GUI",
-  "version": "0.1.0",
+  "description": "Better DSH: archived-session management, task-stop desktop notifications, and an update checker for the dsh web GUI",
+  "version": "0.2.0",
   "keywords": [
     "deepseek",
     "deepseek-harness",
@@ -11,6 +11,7 @@
     "lib/",
     "cordis.patch.yml",
     "README.md",
+    "README.en.md",
     "LICENSE"
   ],
   "type": "module",
@@ -19,6 +20,10 @@
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
     "./package.json": "./package.json"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wackyju2-beep/dsh-better.git"
   },
   "dsh": {
     "bundle": {

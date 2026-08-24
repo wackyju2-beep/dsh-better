@@ -32,11 +32,12 @@ const proto = makeProto();
 const sessionsInstance = Object.create(proto);
 sessionsInstance.list = { getSnapshot: () => ({ byId: { s1: { id: "s1", displayTitle: "测试任务", title: "测试任务", origin: undefined, parentId: undefined } } }), subscribe: () => () => {} };
 const registered = [];
+const dictionaries = {};
 const ctx = {
   sessions: sessionsInstance,
-  locale: { register: () => () => {}, bind: () => (key) => key },
+  locale: { register: (ns, dict) => { dictionaries[ns] = dict; return () => {}; }, bind: () => (key) => key },
   slots: { inject: (name, maker) => { registered.push({ name, entry: maker() }); }, register: (opts, comp) => ({ opts, comp }) },
-  effect: (body, label) => { void body; return () => {}; },
+  effect: (body, label) => { body(); return () => {}; },
 };
 await import("../lib/client.js");
 if (loaded.length !== 1) throw new Error("bundle did not register exactly one module");
@@ -57,6 +58,17 @@ console.log("section id:", entry.opts.id, "| order:", entry.opts.order, "| label
 const injected = entry.opts.inject();
 console.log("inject face keys:", Object.keys(injected).join(","));
 if (injected.ctx !== ctx) throw new Error("ctx missing from inject face");
+
+// Update-checker dictionaries registered with every required key
+const dict = dictionaries["dsh-better"];
+if (dict === undefined) throw new Error("locale dictionary not registered");
+for (const key of ["upd.entry", "upd.entryDesc", "upd.title", "upd.current", "upd.latest",
+	"upd.copy", "upd.copied", "upd.openTerm", "upd.note", "upd.noDir"]) {
+	if (!(key in dict.zh)) throw new Error("missing zh locale key: " + key);
+	if (!(key in dict.en)) throw new Error("missing en locale key: " + key);
+}
+if (!dict.zh["upd.note"].includes("源码构建")) throw new Error("upd.note must mention source-build-only");
+console.log("update locale keys OK (zh+en, note mentions 源码构建)");
 
 // Frame observation through the WRAPPED prototype
 proto.handleMuxEnvelope({ payload: { type: "question/requested", sessionId: "s1", questions: [{ id: "q1", question: "选择方案", options: [{ label: "方案 A（Recommended）" }, { label: "方案 B" }] }] } });

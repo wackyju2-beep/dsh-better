@@ -1,6 +1,7 @@
 
-// dsh-better host-half integration smoke: fake ctx, exercise list/restore/delete.
-import { writeFile, mkdtemp, readFile, rm } from "node:fs/promises";
+// dsh-better host-half integration smoke: fake ctx, exercise list/restore/delete
+// plus the update-checker and open-terminal routes.
+import { writeFile, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert";
@@ -8,6 +9,26 @@ import assert from "node:assert";
 const mod = await import("../lib/index.js");
 assert.equal(typeof mod.apply, "function");
 console.log("host exports:", Object.keys(mod).join(","));
+
+// Version comparator table (exported for exactly this).
+const cmpCases = [
+	["0.1.1-rc.1", "0.1.1-rc.2", -1],
+	["0.1.1-rc.2", "0.1.1", -1],
+	["0.1.1", "0.1.1", 0],
+	["1.0", "1.0.0", 0],
+	["v0.2.0", "0.1.9", 1],
+	["0.2", "0.1.99", 1],
+	["0.1.1-beta.2", "0.1.1-beta.10", -1],
+	["0.1.1-alpha", "0.1.1-beta", -1],
+	["0.1.1-rc.1", "0.1.1-beta.3", 1],
+	["0.1.1-rc.1", "0.1.1-rc", 1],
+	["0.1.1-rc.1", "0.1.2", -1],
+];
+for (const [a, b, expected] of cmpCases) {
+	const sign = Math.sign(mod.compareVersions(a, b));
+	assert.equal(sign, expected, `compareVersions(${a}, ${b}) => ${sign}, want ${expected}`);
+}
+console.log("compareVersions table OK:", cmpCases.length, "cases");
 
 const routes = new Map();
 const warnings = [];
@@ -20,6 +41,14 @@ const artifact = join(dir, "session-s-archived.jsonl");
 const artifactGone = join(dir, "session-s-gone.jsonl");
 await writeFile(artifact, '{"seq":0}\n', "utf8");
 await writeFile(artifactGone, '{"seq":0}\n', "utf8");
+
+// Deterministic checkout discovery: a fake source tree + env override, armed
+// BEFORE any route fires (install discovery memoizes on first use).
+const checkoutDir = join(dir, "checkout");
+await mkdir(join(checkoutDir, "apps", "cli"), { recursive: true });
+await writeFile(join(checkoutDir, "pnpm-workspace.yaml"), "packages:\n  - apps/*\n", "utf8");
+await writeFile(join(checkoutDir, "apps", "cli", "package.json"), JSON.stringify({ name: "@deepseek-ai/dsh", version: "0.0.0-smoke" }), "utf8");
+process.env.DSH_BETTER_REPO_ROOT = checkoutDir;
 
 const ctx = {
   effect: (body, label) => { body(); return () => {}; },
@@ -146,6 +175,128 @@ await new Promise((r) => setTimeout(r, 10));
   await new Promise((r) => setTimeout(r, 30));
   assert.equal(res.statusCode, 409);
   console.log("live refusal OK:", JSON.parse(res.body).error);
+}
+
+// update-check across three stubbed-source scenarios + cache behavior
+{
+  assert.ok(routes.has(mod.UPDATE_PATH), "update-check route registered");
+  const originalFetch = mod.testHooks.fetch;
+  const ATOM_OK = '<feed xmlns="http://www.w3.org/2005/Atom">'
+    + '<entry><id>tag:github.com,2008:Repository/123/dsh-v8.8.8-rc.9</id>'
+    + '<title>DSH v8.8.8-rc.9</title>'
+    + '<link rel="alternate" type="text/html" href="https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v8.8.8-rc.9"/>'
+    + '<updated>2026-08-22T00:00:00Z</updated></entry></feed>';
+
+  try {
+    // (a) latest → 404 (all-prerelease repo), list OK first try; cached after
+    {
+      mod.testHooks.reset();
+      let fetchCalls = 0;
+      mod.testHooks.fetch = async (url) => {
+        fetchCalls += 1;
+        if (String(url).includes("/releases/latest")) return { ok: false, status: 404 };
+        assert.ok(String(url).includes("/releases?per_page=10"), "fallback list url");
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [
+            { tag_name: "dsh-v9.9.9-rc.1", draft: false, prerelease: true, name: "DSH v9.9.9-rc.1", html_url: "https://example.com/r", published_at: "2026-08-20T00:00:00Z" },
+            { tag_name: "dsh-v0.0.1-draft", draft: true },
+          ],
+        };
+      };
+      const res = makeRes();
+      routes.get(mod.UPDATE_PATH)(okReq("GET"), res);
+      await new Promise((r) => setTimeout(r, 30));
+      assert.equal(res.statusCode, 200, res.body);
+      const body = JSON.parse(res.body);
+      assert.equal(body.ok, true);
+      assert.equal(body.current.root, checkoutDir);
+      // Machine-dependent: a pnpm-shim node makes discovery find the global
+      // packaged install; a stock node leaves the running app unknown. Accept both.
+      const kindOk = body.current.installKind === "unknown"
+        || (body.current.installKind === "packaged" && typeof body.current.version === "string");
+      assert.ok(kindOk, "install kind: " + JSON.stringify(body.current));
+      assert.equal(body.latest.version, "9.9.9-rc.1");
+      assert.equal(body.latest.prerelease, true);
+      assert.equal(body.status, body.current.installKind === "packaged" ? "update-available" : "unknown");
+      assert.equal(typeof body.checkedAt === "string", true);
+      const res2 = makeRes();
+      routes.get(mod.UPDATE_PATH)(okReq("GET"), res2);
+      await new Promise((r) => setTimeout(r, 30));
+      assert.equal(fetchCalls, 2, "fresh cache must skip every upstream call (latest + list = 2)");
+      console.log("update-check (list fallback) OK:", JSON.stringify({ status: body.status, latest: body.latest.version }));
+    }
+
+    // (b) api.github.com outage: latest 404 + list 504 twice → atom feed wins
+    {
+      mod.testHooks.reset();
+      let fetchCalls = 0;
+      mod.testHooks.fetch = async (url) => {
+        fetchCalls += 1;
+        const u = String(url);
+        if (u.includes("/releases/latest")) return { ok: false, status: 404 };
+        if (u.includes("/releases?per_page=10")) return { ok: false, status: 504 };
+        assert.ok(u.endsWith("releases.atom"), "atom fallback url");
+        return { ok: true, status: 200, text: async () => ATOM_OK };
+      };
+      const res = makeRes();
+      routes.get(mod.UPDATE_PATH)(okReq("GET"), res);
+      await new Promise((r) => setTimeout(r, 1200));
+      assert.equal(res.statusCode, 200, res.body);
+      const body = JSON.parse(res.body);
+      assert.equal(body.latest && body.latest.version, "8.8.8-rc.9");
+      assert.equal(body.latest.prerelease, true);
+      assert.equal(fetchCalls, 4, "latest(1) + list×2(retry) + atom(1)");
+      console.log("update-check (atom fallback after 504s) OK; upstream calls:", fetchCalls);
+    }
+
+    // (c) every source fails → structured error, nothing cached to fall back on
+    {
+      mod.testHooks.reset();
+      mod.testHooks.fetch = async () => ({ ok: false, status: 500 });
+      const res = makeRes();
+      routes.get(mod.UPDATE_PATH)(okReq("GET"), res);
+      await new Promise((r) => setTimeout(r, 2500));
+      assert.equal(res.statusCode, 200, res.body);
+      const body = JSON.parse(res.body);
+      assert.equal(body.latest, null);
+      assert.ok(String(body.latestError).includes("http-500"), "aggregated error: " + body.latestError);
+      console.log("update-check (total failure) OK:", body.latestError);
+    }
+  } finally {
+    mod.testHooks.fetch = originalFetch;
+    mod.testHooks.reset();
+  }
+}
+
+// open-terminal: stubbed spawner, opens at the discovered root
+{
+  let spawnedAt;
+  const originalSpawner = mod.testHooks.spawnTerminal;
+  mod.testHooks.spawnTerminal = async (target) => { spawnedAt = target; return { pid: 4321 }; };
+  try {
+    const chunks = [Buffer.from("{}")];
+    const req = okReq("POST");
+    req.on = (ev, cb) => { if (ev === "data") cb(chunks[0]); if (ev === "end") cb(); };
+    const res = makeRes();
+    routes.get(mod.TERMINAL_PATH)(req, res);
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(res.statusCode, 200, res.body);
+    const body = JSON.parse(res.body);
+    assert.equal(body.ok, true);
+    assert.equal(body.opened, checkoutDir);
+    assert.equal(spawnedAt, checkoutDir);
+    assert.equal(body.pid, 4321);
+
+    // foreign callers stay fenced out here too
+    const resForeign = makeRes();
+    routes.get(mod.TERMINAL_PATH)(foreignReq, resForeign);
+    assert.equal(resForeign.statusCode, 403);
+    console.log("open-terminal OK; loopback fence holds");
+  } finally {
+    mod.testHooks.spawnTerminal = originalSpawner;
+  }
 }
 
 await rm(dir, { recursive: true, force: true });
