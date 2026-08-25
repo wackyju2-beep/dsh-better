@@ -25,6 +25,7 @@
     "type": "git",
     "url": "git+https://github.com/wackyju2-beep/dsh-better.git"
   },
+  "homepage": "https://github.com/wackyju2-beep/dsh-better#readme",
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
