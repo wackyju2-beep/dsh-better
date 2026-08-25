@@ -9,3 +9,6 @@ Thumbs.db
 # editor
 .vscode/
 .idea/
+
+# local npm config (may contain auth tokens)
+.npmrc
