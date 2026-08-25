@@ -36,6 +36,106 @@ const domainState = { initialized: true, workspaceIds: ["w1"], archivedSessionId
 const records = new Map([["w1", { path: "C:/proj", title: "proj", sessionIds: ["s-archived", "s-other"], createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" }]]);
 let restarts = 0;
 
+// ── model-routing stub services ──────────────────────────────────────────────
+const eventHandlers = new Map();
+const appendedHeaders = [];
+const agentState = { config: undefined };
+const fakeAgent = {
+	id: "session-main",
+	ctx: {},
+	session: {
+		header: {},
+		requestHeader: () => (agentState.config === undefined ? undefined : { config: agentState.config }),
+		append(_type, entry) { appendedHeaders.push(entry); agentState.config = entry.header.config; },
+	},
+};
+const registeredTools = [];
+const llmStub = {
+	listProviders: () => [{ id: "deepseek-official", name: "DeepSeek" }],
+	listConfigurableProviders: () => [
+		{ provider: "deepseek-official", displayName: "DeepSeek", settingsNs: "llm-deepseek", settingsPath: [] },
+		{ provider: "openrouter", displayName: "OpenRouter", settingsNs: "llm-openrouter", settingsPath: [] },
+	],
+	listModels: async (provider) => (provider === "deepseek-official" ? [{ id: "deepseek-v4-flash", name: "V4 Flash" }] : []),
+	resolveModelInfo: async (_provider, model) => ({
+		provider: _provider, id: model, name: model,
+		reasoning: { efforts: [{ id: "high", name: "High" }, { id: "low", name: "Low" }], defaultEffort: "high" },
+	}),
+	resolveCallConfig: async (config) => config,
+};
+
+// Real host builds for the router's runtime seams; skipped gracefully when
+// this checkout is not present (the ready-path tests then report and stop).
+let zReal;
+let canonicalHeaderReal;
+let installModelSelectionReal;
+try {
+	const { pathToFileURL } = await import("node:url");
+	zReal = (await import(pathToFileURL("D:/.dsh/deepseek-harness/vendor/schemastery/lib/index.cjs").href)).default;
+	canonicalHeaderReal = (await import(pathToFileURL("D:/.dsh/deepseek-harness/packages/core/session/lib/index.js").href)).canonicalHeader;
+	installModelSelectionReal = (await import(pathToFileURL("D:/.dsh/deepseek-harness/packages/core/agent/lib/index.js").href)).installModelSelection;
+} catch { /* off-machine */ }
+
+function mrMergeLayers(under, over) {
+	if (over === undefined) return under;
+	if (under === undefined) return over;
+	if (typeof under !== "object" || under === null || Array.isArray(under) || typeof over !== "object" || over === null || Array.isArray(over)) return over;
+	const merged = { ...under };
+	for (const [key, value] of Object.entries(over)) merged[key] = key in merged ? mrMergeLayers(merged[key], value) : value;
+	return merged;
+}
+
+function makeMemorySettings(z2) {
+	void z2;
+	const sections = new Map();
+	const registrations = new Map();
+	const writeSection = async (ns, section, expectedRevision) => {
+		const reg = registrations.get(ns);
+		if (reg === undefined) throw new Error("settings namespace \"" + ns + "\" is not registered");
+		if (Number.isInteger(expectedRevision) && expectedRevision !== reg.revision) {
+			const error = new Error("settings namespace \"" + ns + "\" moved past revision " + expectedRevision);
+			error.name = "SettingsConflictError";
+			throw error;
+		}
+		sections.set(ns, structuredClone(section));
+		reg.resolveValue();
+		reg.revision += 1;
+		reg.cb?.();
+	};
+	return {
+		writable: true,
+		register(ns, schema, options) {
+			if (registrations.has(ns)) throw new Error("settings namespace \"" + ns + "\" is already registered");
+			const reg = { ns, revision: 0, resolved: undefined };
+			reg.resolveValue = () => {
+				// Mirror SettingsProvider.resolve: one callable-schema pass over
+				// mergeLayers(base, userSection) applies defaults + validation.
+				reg.resolved = schema(mrMergeLayers(options?.base, sections.get(ns)));
+				options?.validate?.(reg.resolved);
+				return reg.resolved;
+			};
+			reg.resolved = reg.resolveValue();
+			registrations.set(ns, reg);
+			return {
+				get: () => reg.resolved,
+				watch: (cb) => { reg.cb = cb; return () => { reg.cb = undefined; }; },
+				update: async () => {},
+				replace: async (section, expectedRevision) => writeSection(ns, section, expectedRevision),
+			};
+		},
+		describe: () => [...registrations.values()].map((reg) => ({ ns: reg.ns, value: reg.resolved, revision: reg.revision })),
+		get(ns) { return registrations.get(ns)?.resolved; },
+		replace: async (ns, section, expectedRevision) => writeSection(ns, section, expectedRevision),
+	};
+}
+
+if (zReal !== undefined && canonicalHeaderReal !== undefined) {
+	mod.testHooks.seedAppModule("@deepseek-ai/dsh-session", { canonicalHeader: canonicalHeaderReal });
+	if (installModelSelectionReal !== undefined) mod.testHooks.seedAppModule("@deepseek-ai/dsh-agent", { installModelSelection: installModelSelectionReal });
+	mod.testHooks.seedAppModule("@deepseek-ai/schemastery", { default: zReal });
+}
+
+
 const dir = await mkdtemp(join(tmpdir(), "dsh-better-test-"));
 const artifact = join(dir, "session-s-archived.jsonl");
 const artifactGone = join(dir, "session-s-gone.jsonl");
@@ -61,8 +161,19 @@ const ctx = {
       update: async (k, fn) => { const next = fn(records.get(k)); records.set(k, next); return next; },
     }),
   } : undefined },
+  on(event, cb) {
+    const list = eventHandlers.get(event) ?? [];
+    list.push(cb);
+    eventHandlers.set(event, list);
+    return () => { const i = list.indexOf(cb); if (i >= 0) list.splice(i, 1); };
+  },
+  settings: makeMemorySettings(zReal),
   get(service) {
     if (service === "sessions") return { get: (id) => id === "s-live" ? { id } : undefined };
+    if (service === "llm") return llmStub;
+    if (service === "agents") return { list: () => [fakeAgent], get: (id) => String(id) === "session-main" ? fakeAgent : undefined };
+    if (service === "tools") return { register: (def) => { registeredTools.push(def); return () => {}; } };
+    if (service === "agentDefaultModel") return { currentSelection: () => ({ provider: "deepseek-official", model: "deepseek-v4-flash" }) };
     if (service === "sessionPersistence") return {
       supportsRawArtifacts: true,
       locate: (header) => header.id === "s-archived" ? { kind: "jsonl", path: artifact }
@@ -281,7 +392,7 @@ await new Promise((r) => setTimeout(r, 10));
     req.on = (ev, cb) => { if (ev === "data") cb(chunks[0]); if (ev === "end") cb(); };
     const res = makeRes();
     routes.get(mod.TERMINAL_PATH)(req, res);
-    await new Promise((r) => setTimeout(r, 30));
+    await new Promise((r) => setTimeout(r, 800)); // discovery re-walks the fs after reset(); give it room
     assert.equal(res.statusCode, 200, res.body);
     const body = JSON.parse(res.body);
     assert.equal(body.ok, true);
@@ -297,6 +408,207 @@ await new Promise((r) => setTimeout(r, 10));
   } finally {
     mod.testHooks.spawnTerminal = originalSpawner;
   }
+}
+
+// ── model routing: pure logic tables ─────────────────────────────────────────
+{
+	// matchRule: order, first-match-wins, disabled skip, case folding, miss
+	const rules = [
+		{ id: "a", enabled: true, keywords: ["架构"], target: { provider: "p", model: "m" } },
+		{ id: "b", enabled: false, keywords: ["架构"], target: { provider: "p", model: "m2" } },
+		{ id: "c", enabled: true, keywords: ["Summary"], target: { provider: "p", model: "m3" } },
+	];
+	assert.equal(mod.matchRule(rules, "帮我做架构 review", false)?.id, "a");
+	assert.equal(mod.matchRule(rules, "summary please", false)?.id, "c");
+	assert.equal(mod.matchRule(rules, "summary please", true), undefined, "case-sensitive miss");
+	assert.equal(mod.matchRule(rules, "无关内容", false), undefined);
+	assert.equal(mod.matchRule([], "x", false), undefined);
+	console.log("matchRule table OK");
+
+	// resolveRouterConfig: normalization + rejections
+	const cfg = mod.resolveRouterConfig({
+		enabled: true, matchCase: false,
+		rules: [{ id: " r1 ", keywords: [" 汇总 ", ""], target: { provider: " p ", model: " m ", reasoningEffort: " high " } }],
+		agentSwitch: { enabled: true, allow: [{ provider: "a", model: "b" }] },
+	});
+	assert.deepEqual(cfg.rules[0].keywords, ["汇总"]);
+	assert.equal(cfg.rules[0].target.provider, "p");
+	assert.equal(cfg.rules[0].target.reasoningEffort, "high");
+	assert.equal(cfg.agentSwitch.allow.length, 1);
+	assert.throws(() => mod.resolveRouterConfig({ rules: [{ id: "x", keywords: ["k"], target: { provider: "p", model: "" } }] }), /model 不能为空/);
+	assert.throws(() => mod.resolveRouterConfig({
+		rules: [
+			{ id: "dup", keywords: ["a"], target: { provider: "p", model: "m" } },
+			{ id: "dup", keywords: ["b"], target: { provider: "p", model: "m" } },
+		],
+	}), /重复/);
+	assert.throws(() => mod.resolveRouterConfig({ rules: [{ id: "nokey", keywords: [], target: { provider: "p", model: "m" } }] }), /keywords/);
+	console.log("resolveRouterConfig table OK");
+
+	// selectionEquals
+	assert.equal(mod.selectionEquals({ provider: "a", model: "b" }, { provider: "a", model: "b" }), true);
+	assert.equal(mod.selectionEquals({ provider: "a", model: "b", reasoningEffort: undefined }, { provider: "a", model: "b", reasoningEffort: "high" }), false);
+
+	// model_route tool: allowlist gate + apply path
+	{
+		let appliedTo;
+		const tool = mod.createModelRouteTool({
+			allowlist: () => [{ provider: "deepseek-official", model: "deepseek-v4-flash" }],
+			resolveTarget: async (target) => ({ selection: target }),
+			apply: (agent, selection) => { appliedTo = selection; },
+		});
+		assert.equal(tool.name, "model_route");
+		await assert.rejects(
+			tool.execute({ provider: "openrouter", model: "free" }, { agent: fakeAgent, signal: new AbortController().signal }),
+			(error) => error.code === "ROUTE_NOT_ALLOWED",
+		);
+		const value = await tool.execute({ provider: "deepseek-official", model: "deepseek-v4-flash" }, { agent: fakeAgent, signal: new AbortController().signal });
+		assert.deepEqual(value.applied, { provider: "deepseek-official", model: "deepseek-v4-flash" });
+		assert.deepEqual(appliedTo, { provider: "deepseek-official", model: "deepseek-v4-flash" });
+		console.log("model_route tool gate OK");
+	}
+
+	// resolveTarget against the stub llm
+	{
+		await assert.rejects(
+			mod.resolveTarget(llmStub, { provider: "ghost", model: "m" }),
+			(error) => error.code === "ROUTE_PROVIDER_INACTIVE",
+		);
+		const resolved = await mod.resolveTarget(llmStub, { provider: "deepseek-official", model: "deepseek-v4-flash" });
+		assert.deepEqual(resolved.selection, { provider: "deepseek-official", model: "deepseek-v4-flash" });
+		assert.equal(resolved.reasoningEfforts.length, 2);
+	}
+}
+
+// ── model routing: endpoint round-trips ──────────────────────────────────────
+{
+	for (const path of [mod.ROUTER_SNAPSHOT_PATH, mod.ROUTER_SAVE_PATH, mod.ROUTER_APPLY_PATH, mod.ROUTER_EFFORTS_PATH]) {
+		assert.ok(routes.has(path), "route registered: " + path);
+	}
+	if (!(zReal !== undefined && canonicalHeaderReal !== undefined)) {
+		console.log("SKIP router endpoint tests (host checkout modules unavailable)");
+	} else {
+		// snapshot
+		{
+			const res = makeRes();
+			routes.get(mod.ROUTER_SNAPSHOT_PATH)(okReq("GET"), res);
+			await new Promise((r) => setTimeout(r, 30));
+			assert.equal(res.statusCode, 200, res.body);
+			const body = JSON.parse(res.body);
+			assert.equal(body.ok, true);
+			assert.equal(body.available, true);
+			assert.equal(body.providers.length, 2);
+			assert.equal(body.providers.find((row) => row.provider === "openrouter").active, false);
+			assert.equal(body.modelsByProvider["deepseek-official"][0].id, "deepseek-v4-flash");
+			assert.equal(body.defaultModel.model, "deepseek-v4-flash");
+			assert.equal(body.effective, null);
+			console.log("router snapshot OK; providers:", body.providers.map((row) => row.provider + ":" + (row.active ? "on" : "off")).join(","));
+		}
+
+		// save → registers the model_route tool + arms rule targets
+		{
+			const config = {
+				enabled: true,
+				matchCase: false,
+				rules: [{ id: "arch", keywords: ["架构"], target: { provider: "deepseek-official", model: "deepseek-v4-flash" } }],
+				agentSwitch: { enabled: true, allow: [{ provider: "deepseek-official", model: "deepseek-v4-flash" }] },
+			};
+			const chunks = [Buffer.from(JSON.stringify({ value: config, expectedRevision: 0 }))];
+			const req = okReq("POST");
+			req.on = (ev, cb) => { if (ev === "data") cb(chunks[0]); if (ev === "end") cb(); };
+			const res = makeRes();
+			routes.get(mod.ROUTER_SAVE_PATH)(req, res);
+			await new Promise((r) => setTimeout(r, 60));
+			assert.equal(res.statusCode, 200, res.body);
+			const body = JSON.parse(res.body);
+			assert.equal(body.ok, true, res.body);
+			assert.equal(body.features.modelRouteRegistered, true);
+			assert.ok(registeredTools.some((tool) => tool.name === "model_route"), "model_route registered after save");
+			await new Promise((r) => setTimeout(r, 40)); // let validateRuleTargets commit
+
+			// keyword dispatch through the inbox listener
+			const handlers = eventHandlers.get("agent/inbox/inserted") ?? [];
+			assert.ok(handlers.length > 0, "inbox listener armed");
+			for (const handler of handlers) handler({ agent: fakeAgent, message: { source: { kind: "user" }, content: [{ type: "text", text: "请帮我做架构重构" }] } });
+			assert.equal(appendedHeaders.length, 1, "one session header write");
+			assert.equal(appendedHeaders[0].header.config.model, "deepseek-v4-flash");
+			assert.equal(appendedHeaders[0].reason, "change");
+			// non-user messages never touch the session
+			for (const handler of handlers) handler({ agent: fakeAgent, message: { source: { kind: "plugin" }, content: [{ type: "text", text: "架构" }] } });
+			assert.equal(appendedHeaders.length, 1, "non-user message ignored");
+			// no-match leaves the header alone too
+			for (const handler of handlers) handler({ agent: fakeAgent, message: { source: { kind: "user" }, content: [{ type: "text", text: "今天天气不错" }] } });
+			assert.equal(appendedHeaders.length, 1, "no-match ignored");
+
+			// conflict: stale revision now rejects
+			{
+				const chunks2 = [Buffer.from(JSON.stringify({ value: config, expectedRevision: 0 }))];
+				const req2 = okReq("POST");
+				req2.on = (ev, cb) => { if (ev === "data") cb(chunks2[0]); if (ev === "end") cb(); };
+				const res2 = makeRes();
+				routes.get(mod.ROUTER_SAVE_PATH)(req2, res2);
+				await new Promise((r) => setTimeout(r, 30));
+				assert.equal(res2.statusCode, 409, res2.body);
+				assert.equal(JSON.parse(res2.body).error, "conflict");
+				console.log("router save + conflict + rule dispatch OK");
+			}
+		}
+
+		// apply endpoint: live validation + session write + refusals
+		{
+			const post = (payloadObj) => {
+				const chunks = [Buffer.from(JSON.stringify(payloadObj))];
+				const req = okReq("POST");
+				req.on = (ev, cb) => { if (ev === "data") cb(chunks[0]); if (ev === "end") cb(); };
+				const res = makeRes();
+				routes.get(mod.ROUTER_APPLY_PATH)(req, res);
+				return res;
+			};
+			let res = post({ sessionId: "session-missing", target: { provider: "deepseek-official", model: "deepseek-v4-flash" } });
+			await new Promise((r) => setTimeout(r, 30));
+			assert.equal(res.statusCode, 404, res.body);
+			res = post({ sessionId: "session-main", target: { provider: "openrouter", model: "free" } });
+			await new Promise((r) => setTimeout(r, 30));
+			assert.equal(res.statusCode, 400, res.body);
+			assert.equal(JSON.parse(res.body).error, "ROUTE_PROVIDER_INACTIVE");
+			const before = appendedHeaders.length;
+			res = post({ sessionId: "session-main", target: { provider: "deepseek-official", model: "deepseek-v4-flash", reasoningEffort: "high" } });
+			await new Promise((r) => setTimeout(r, 30));
+			assert.equal(res.statusCode, 200, res.body);
+			const body = JSON.parse(res.body);
+			assert.equal(body.ok, true);
+			assert.equal(body.changed, true);
+			assert.equal(appendedHeaders.length, before + 1);
+			assert.equal(appendedHeaders[appendedHeaders.length - 1].header.config.reasoningEffort, "high");
+			console.log("router apply OK (valid, dormant-refused, missing-session)");
+		}
+
+		// efforts lookup
+		{
+			const req = okReq("GET");
+			Object.defineProperty(req, "url", { value: mod.ROUTER_EFFORTS_PATH + "?provider=deepseek-official&model=deepseek-v4-flash" });
+			const res = makeRes();
+			routes.get(mod.ROUTER_EFFORTS_PATH)(req, res);
+			await new Promise((r) => setTimeout(r, 30));
+			assert.equal(res.statusCode, 200, res.body);
+			const body = JSON.parse(res.body);
+			assert.equal(body.ok, true);
+			assert.equal(body.efforts[0].id, "high");
+			console.log("router efforts OK:", body.efforts.map((e) => e.id).join("/"));
+		}
+
+		// foreign callers stay fenced on every new route
+		const foreignGet = { method: "GET", socket: { remoteAddress: "192.168.1.9" }, headers: { host: "lan-box:3080" }, on() {} };
+		for (const path of [mod.ROUTER_SNAPSHOT_PATH, mod.ROUTER_EFFORTS_PATH]) {
+			const res = makeRes();
+			routes.get(path)(foreignGet, res);
+			assert.equal(res.statusCode, 403);
+		}
+		const postRes = makeRes();
+		routes.get(mod.ROUTER_SAVE_PATH)(foreignReq, postRes);
+		assert.equal(postRes.statusCode, 403);
+		console.log("router loopback fence holds");
+	}
 }
 
 await rm(dir, { recursive: true, force: true });

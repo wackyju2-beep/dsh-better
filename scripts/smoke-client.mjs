@@ -53,7 +53,7 @@ const mod = loaded[0].factory((spec) => {
 console.log("factory exports:", Object.keys(mod).join(","));
 mod.apply(ctx);
 console.log("slots.inject calls:", registered.map(r => r.name).join(","));
-const entry = registered[0].entry;
+const entry = registered.find((r) => r.name === "settings.section").entry;
 console.log("section id:", entry.opts.id, "| order:", entry.opts.order, "| label:", entry.opts.label());
 const injected = entry.opts.inject();
 console.log("inject face keys:", Object.keys(injected).join(","));
@@ -69,6 +69,19 @@ for (const key of ["upd.entry", "upd.entryDesc", "upd.title", "upd.current", "up
 }
 if (!dict.zh["upd.note"].includes("源码构建")) throw new Error("upd.note must mention source-build-only");
 console.log("update locale keys OK (zh+en, note mentions 源码构建)");
+
+// Model-routing dictionaries + the keyed tool card slot
+for (const key of ["mr.entry", "mr.entryDesc", "mr.title", "mr.statusEngine", "mr.rules",
+	"mr.allowTitle", "mr.addRule", "mr.addAllow", "mr.save", "mr.discard", "mr.conflict",
+	"mr.cardTitle", "mr.cardNext"]) {
+	if (!(key in dict.zh)) throw new Error("missing zh locale key: " + key);
+	if (!(key in dict.en)) throw new Error("missing en locale key: " + key);
+}
+const names = registered.map((r) => r.name);
+if (!names.includes("tool.call.toolview")) throw new Error("tool.call.toolview slot not injected");
+const toolEntry = registered.find((r) => r.name === "tool.call.toolview").entry;
+if (toolEntry.opts.key !== "model_route") throw new Error("tool card must be keyed model_route");
+console.log("model-routing locale keys OK; tool card keyed:", toolEntry.opts.key);
 
 // Frame observation through the WRAPPED prototype
 proto.handleMuxEnvelope({ payload: { type: "question/requested", sessionId: "s1", questions: [{ id: "q1", question: "选择方案", options: [{ label: "方案 A（Recommended）" }, { label: "方案 B" }] }] } });

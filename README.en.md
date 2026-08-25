@@ -2,7 +2,7 @@
 
 > **Unofficial community plugin.** Not affiliated with DeepSeek. 非官方社区插件，与 DeepSeek 官方无关。Code produced by AI.
 
-Better DSH — a dual-half plugin (host + browser) that follows the DeepSeek Harness plugin conventions and adds three capabilities to the dsh web GUI.
+Better DSH — a dual-half plugin (host + browser) that follows the DeepSeek Harness plugin conventions and adds four capabilities to the dsh web GUI.
 
 [中文](README.md) · English
 
@@ -52,3 +52,17 @@ Settings → Better DSH → Check for updates:
   2. Walking up from the process entry (`argv[1]`) and the working directory to the nearest `@deepseek-ai/dsh` package.json — hits both source runs and packaged installs;
   3. The pnpm-global store next to the node executable (`<pnpm>/global/*/node_modules/@deepseek-ai/dsh`);
   4. Convention-path scanning `<drive>:\.dsh\deepseek-harness` (C..Z).
+
+### Model routing
+
+Settings → Better DSH → Model routing (design ported from [dsh-model-router](https://github.com/superboy911/dsh-model-router), trimmed to what was needed). The DSH Models page remains the ONLY place to configure providers, credentials, and catalogs; this page owns policy only:
+
+- **Status overview**: engine on/off, enabled rule count, the current session's effective selection (with its source: session header / harness default), the harness default model (read-only), and whether the `model_route` tool is registered;
+- **Keyword rule routing**: rules match the user message text in order — first match wins; a miss changes nothing. Each rule = keyword list (comma-separated) → target provider / model / optional reasoning effort. Before any session write the target passes exact validation against the live DSH registry (provider active, model resolvable, effort supported); a failed validation writes nothing. Dormant targets can be saved but never execute;
+- **Subagent repair**: subagent sessions skip api-proxy's selection assembly by design, so the engine lazily installs the official selection assembly and keyword rules take effect on the subagent's FIRST request;
+- **model_route switch tool** (default off): when enabled, the agent may switch the current session's model on its own — strictly within an explicitly allowlisted set of provider/model/effort entries; every execution still passes live validation. Enabled with an empty allowlist registers no tool. The chat stream shows a route card (applied route + "takes effect on the next assistant message");
+- **Editing experience**: the provider dropdown separates Active/Dormant groups, the model input suggests against the official catalog, reasoning-effort options lazy-load per model; every rule has its own enable toggle and an "Apply to this session" button; saves use revision-based optimistic locking with an explicit conflict notice;
+- Configuration persists under the dedicated settings namespace `better-model-router` (deliberately distinct from the original plugin's namespace so both can coexist), applies live, and needs no restart.
+
+Implementation note: dsh-better loads through a symlinked directory, so static `import "@deepseek-ai/*"` is impossible; the host half resolves the host modules it needs AT RUNTIME anchored at the process entry (the exact same workspace builds the running app uses). Any unresolvable module degrades only its own feature with a logged explanation — never the rest of the plugin.
+

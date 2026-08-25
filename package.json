@@ -1,7 +1,7 @@
 {
   "name": "dsh-better",
-  "description": "Better DSH: archived-session management, task-stop desktop notifications, and an update checker for the dsh web GUI",
-  "version": "0.2.0",
+  "description": "Better DSH: archived-session management, task-stop desktop notifications, an update checker, and model routing (keyword rules + allowlist-gated model_route) for the dsh web GUI",
+  "version": "0.3.0",
   "keywords": [
     "deepseek",
     "deepseek-harness",
