@@ -371,10 +371,12 @@ await new Promise((r) => setTimeout(r, 10));
       console.log("update-check (atom fallback after 504s) OK; upstream calls:", fetchCalls);
     }
 
-    // (c) every source fails → structured error, nothing cached to fall back on
+    // (c) every source fails → structured error; an immediate repeat fast-fails
+    //     on the failure marker without touching upstream again
     {
       mod.testHooks.reset();
-      mod.testHooks.fetch = async () => ({ ok: false, status: 500 });
+      let fetchCalls = 0;
+      mod.testHooks.fetch = async () => { fetchCalls += 1; return { ok: false, status: 500 }; };
       const res = makeRes();
       routes.get(mod.UPDATE_PATH)(okReq("GET"), res);
       await new Promise((r) => setTimeout(r, 2500));
@@ -382,7 +384,42 @@ await new Promise((r) => setTimeout(r, 10));
       const body = JSON.parse(res.body);
       assert.equal(body.latest, null);
       assert.ok(String(body.latestError).includes("http-500"), "aggregated error: " + body.latestError);
-      console.log("update-check (total failure) OK:", body.latestError);
+      assert.equal(fetchCalls, 5, "full chain = latest(1) + list×2 + atom×2");
+      const res2 = makeRes();
+      routes.get(mod.UPDATE_PATH)(okReq("GET"), res2);
+      await new Promise((r) => setTimeout(r, 150));
+      assert.equal(JSON.parse(res2.body).latestError, body.latestError, "repeat serves the remembered failure");
+      assert.equal(fetchCalls, 5, "failure marker must fast-fail the immediate retry");
+      console.log("update-check (total failure + fast-fail) OK:", body.latestError);
+    }
+
+    // (d) dequeued + deduplicated: two parallel checks join ONE upstream chain
+    {
+      mod.testHooks.reset();
+      let fetchCalls = 0;
+      mod.testHooks.fetch = async (url) => {
+        fetchCalls += 1;
+        if (String(url).includes("/releases/latest")) return { ok: false, status: 404 };
+        await new Promise((r2) => setTimeout(r2, 40)); // widen the race window
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [
+            { tag_name: "dsh-v9.9.9-rc.1", draft: false, prerelease: true, name: "DSH v9.9.9-rc.1", html_url: "https://example.com/r", published_at: "2026-08-20T00:00:00Z" },
+          ],
+        };
+      };
+      const resA = makeRes();
+      const resB = makeRes();
+      routes.get(mod.UPDATE_PATH)(okReq("GET"), resA);
+      routes.get(mod.UPDATE_PATH)(okReq("GET"), resB);
+      await new Promise((r) => setTimeout(r, 400));
+      assert.equal(resA.statusCode, 200, resA.body);
+      assert.equal(resB.statusCode, 200, resB.body);
+      assert.equal(JSON.parse(resA.body).latest.version, "9.9.9-rc.1");
+      assert.equal(JSON.parse(resB.body).latest.version, "9.9.9-rc.1");
+      assert.equal(fetchCalls, 2, "parallel checks must share one chain (latest + list), not double it");
+      console.log("update-check (dequeued, parallel dedupe) OK; upstream calls:", fetchCalls);
     }
   } finally {
     mod.testHooks.fetch = originalFetch;

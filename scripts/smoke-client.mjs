@@ -63,12 +63,14 @@ if (injected.ctx !== ctx) throw new Error("ctx missing from inject face");
 const dict = dictionaries["dsh-better"];
 if (dict === undefined) throw new Error("locale dictionary not registered");
 for (const key of ["upd.entry", "upd.entryDesc", "upd.title", "upd.current", "upd.latest",
-	"upd.copy", "upd.copied", "upd.openTerm", "upd.note", "upd.noDir"]) {
+	"upd.copy", "upd.copied", "upd.openTerm", "upd.note", "upd.noDir",
+	"upd.npmTitle", "upd.srcTitle"]) {
 	if (!(key in dict.zh)) throw new Error("missing zh locale key: " + key);
 	if (!(key in dict.en)) throw new Error("missing en locale key: " + key);
 }
 if (!dict.zh["upd.note"].includes("源码构建")) throw new Error("upd.note must mention source-build-only");
-console.log("update locale keys OK (zh+en, note mentions 源码构建)");
+if (!dict.zh["upd.note"].includes("@latest")) throw new Error("upd.note must explain the @latest suffix");
+console.log("update locale keys OK (zh+en, note covers @latest suffix and 源码构建)");
 
 // Model-routing dictionaries + the keyed tool card slot
 for (const key of ["mr.entry", "mr.entryDesc", "mr.title", "mr.statusEngine", "mr.rules",
