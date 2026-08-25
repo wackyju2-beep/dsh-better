@@ -74,7 +74,7 @@ And something we're a little proud of: the UI **follows dsh's original design la
 | v0.1.0 | First release: archived sessions + task notifications |
 | v0.2.0 | Update checker (directory discovery chain, three-tier release sources, terminal popup); English docs |
 | v0.3.0 | Model routing (ported from [dsh-model-router](https://github.com/superboy911/dsh-model-router)) |
-| v0.3.1 | First publish to npm; a round of fixes: reversible notification-engine wrapping, sessions that die mid-question no longer swallow completion notifications, a cross-site request fence (POST must declare JSON), update-check moved off the serial queue with concurrency dedupe and a failure cache |
+| v0.3.2 | First publish to npm; a round of fixes: reversible notification-engine wrapping, sessions that die mid-question no longer swallow completion notifications, a cross-site request fence (POST must declare JSON), update-check moved off the serial queue with concurrency dedupe and a failure cache, and model-routing hardening (upstream timeout caps, read-only routes off the serial queue, parallel rule validation, working in-subagent model switches, session-selection echo after save) |
 
 ## Feedback
 
