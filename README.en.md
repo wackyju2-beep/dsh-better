@@ -22,7 +22,7 @@ Settings → Better DSH:
 
 - **Archived sessions** — lists every archived conversation; restore any of them to its original workspace slot, or delete the archive for good;
 - **Task notifications** — while the page stays open, stopped tasks raise native system notifications (Windows toast / macOS / Linux desktop): when the agent asks a question or offers options, when a task completes, and when it stops with an error;
-- **Update checker** — compares your build against the latest release (full semver rules), copies the whole update command chain in one click, and can pop up an independent terminal window at your checkout for you to paste them into;
+- **Update checker** — compares your build against the latest release (full semver rules); ships two copy-ready command groups, the npm one (`npm install -g @deepseek-ai/dsh@latest`, `npx @deepseek-ai/dsh@latest web`) and a source-build one, and can pop up an independent terminal window at your checkout for you to paste them into;
 - **Model routing** — keyword rules match user messages in order; on a hit, the current session is switched to the configured provider / model / reasoning effort, exact-validated against the live DSH registry before anything is written. An optional `model_route` tool lets the agent switch models on its own, strictly within an explicit allowlist (design ported from [dsh-model-router](https://github.com/superboy911/dsh-model-router), trimmed to what was needed).
 
 Every configuration change applies live — no restart needed.
