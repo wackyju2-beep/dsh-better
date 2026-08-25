@@ -193,7 +193,7 @@ assert.ok(routes.has(mod.LIST_PATH) && routes.has(mod.RESTORE_PATH) && routes.ha
 console.log("routes registered:", [...routes.keys()].join(", "));
 
 // peer address helpers
-const okReq = (method) => ({ method, socket: { remoteAddress: "127.0.0.1" }, headers: { host: "127.0.0.1:3080" }, on() {} });
+const okReq = (method) => ({ method, socket: { remoteAddress: "127.0.0.1" }, headers: { host: "127.0.0.1:3080", ...(method === "POST" ? { "content-type": "application/json" } : {}) }, on() {} });
 const foreignReq = { method: "POST", socket: { remoteAddress: "192.168.1.9" }, headers: { host: "lan-box:3080" }, on() {} };
 function makeRes() {
   const res = { statusCode: undefined, body: undefined, writeHead(code) { this.statusCode = code; }, end(b) { this.body = b; } };
@@ -211,6 +211,15 @@ function makeRes() {
   const res = makeRes();
   routes.get(mod.DELETE_PATH)({ ...okReq("GET"), on() {}, headers: okReq("GET").headers }, res);
   assert.equal(res.statusCode, 405);
+}
+// cross-site "simple request" without the JSON content-type refused (CSRF fence)
+{
+  const req = okReq("POST");
+  req.headers = { host: "127.0.0.1:3080" }; // no content-type: what a cross-origin form/fetch sends
+  req.on = (ev, cb) => { if (ev === "end") cb(); };
+  const res = makeRes();
+  routes.get(mod.DELETE_PATH)(req, res);
+  assert.equal(res.statusCode, 415);
 }
 // list
 {
