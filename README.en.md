@@ -2,7 +2,7 @@
 
 > **Unofficial community plugin.** Not affiliated with DeepSeek. Code produced by AI.
 
-Better DSH — a dual-half plugin (host + browser) that follows the DeepSeek Harness plugin conventions and adds a few handy tools to the dsh web GUI: archived-session management, system-level task notifications, an update checker and model routing. Everything lives under Settings → Better DSH, ready to use right after install.
+Better DSH — a dual-half plugin (host + browser) that follows the DeepSeek Harness plugin conventions and adds a few handy tools to the dsh web GUI: archived-session management, system-level task notifications, an update checker, model routing, and a DeepSeek-style message scroll nav. Everything lives under Settings → Better DSH, ready to use right after install.
 
 [中文](README.md) · English
 
@@ -57,6 +57,16 @@ Route sessions to a target model by keyword rules (design ported from [dsh-model
 
 Every configuration change applies live — no restart needed.
 
+### Message scroll nav
+
+A 1:1 port of the [chat.deepseek.com](https://chat.deepseek.com) scroll nav, docked at the conversation's right edge:
+
+- every message you sent (steering included) maps to one tick line on a blurred pill track;
+- hovering pops up a **preview panel**: one row pairs with one tick, the wheel scrolls when it overflows, with gradient fades at the scrollable edges;
+- clicking a row jumps straight to that message; the message currently in view carries an enlarged brand-colored active tick;
+- follows the light/dark theme by default;
+- explicit colors are customizable in its settings page — applied live.
+
 ## How it works
 
 A standard dual-half plugin:
@@ -75,6 +85,7 @@ And something we're a little proud of: the UI **follows dsh's original design la
 | v0.2.0 | Update checker (directory discovery chain, three-tier release sources, terminal popup); English docs |
 | v0.3.0 | Model routing (ported from [dsh-model-router](https://github.com/superboy911/dsh-model-router)) |
 | v0.3.2 | First publish to npm; a round of fixes: reversible notification-engine wrapping, sessions that die mid-question no longer swallow completion notifications, a cross-site request fence (POST must declare JSON), update-check moved off the serial queue with concurrency dedupe and a failure cache, and model-routing hardening (upstream timeout caps, read-only routes off the serial queue, parallel rule validation, working in-subagent model switches, session-selection echo after save) |
+| v0.4.0 | Message scroll nav: chat.deepseek.com-style user-message ticks (hover to preview, click to jump) with customizable colors |
 
 ## Feedback
 

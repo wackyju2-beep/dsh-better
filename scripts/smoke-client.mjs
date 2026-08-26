@@ -7,7 +7,8 @@ globalThis.window = {
   Notification: undefined,
   addEventListener: () => {},
 };
-globalThis.document = { createElement: () => ({ setAttribute(){}, get textContent(){return ""}, set textContent(v){ this._t = v; } }), head: { appendChild(){} } };
+globalThis.document = { createElement: () => { const el = { setAttribute(){}, get textContent(){return ""}, set textContent(v){ this._t = v; } }; createdElements.push(el); return el; }, head: { appendChild(){} } };
+const createdElements = [];
 globalThis.__ModuleLoader__ = { load(def) { loaded.push(def) } };
 globalThis.window.__ModuleLoader__ = globalThis.__ModuleLoader__;
 
@@ -84,6 +85,23 @@ if (!names.includes("tool.call.toolview")) throw new Error("tool.call.toolview s
 const toolEntry = registered.find((r) => r.name === "tool.call.toolview").entry;
 if (toolEntry.opts.key !== "model_route") throw new Error("tool card must be keyed model_route");
 console.log("model-routing locale keys OK; tool card keyed:", toolEntry.opts.key);
+
+// Scroll nav (v0.4.0): frame overlay entry, dictionaries, and injected styles
+if (!names.includes("shell.overlay")) throw new Error("shell.overlay slot not injected");
+const snEntry = registered.find((r) => r.name === "shell.overlay").entry;
+if (snEntry.opts.id !== "dsh-better-scroll-nav") throw new Error("scroll nav must be id dsh-better-scroll-nav");
+const snInjected = snEntry.opts.inject();
+if (snInjected.ctx !== ctx) throw new Error("ctx missing from scroll nav inject face");
+for (const key of ["sn.entry", "sn.entryDesc", "sn.title", "sn.enable", "sn.colors",
+	"sn.trackColor", "sn.trackOpacity", "sn.tickColor", "sn.tickOpacity",
+	"sn.hoverColor", "sn.activeColor", "sn.panelColor", "sn.customColorsDesc", "sn.imageFallback"]) {
+	if (!(key in dict.zh)) throw new Error("missing zh locale key: " + key);
+	if (!(key in dict.en)) throw new Error("missing en locale key: " + key);
+}
+if (!createdElements.some((el) => typeof el._t === "string" && el._t.includes(".dtb_sn"))) {
+	throw new Error("scroll nav stylesheet (.dtb_sn*) was not installed");
+}
+console.log("scroll nav OK: shell.overlay entry, sn.* locale keys, .dtb_sn styles");
 
 // Frame observation through the WRAPPED prototype
 proto.handleMuxEnvelope({ payload: { type: "question/requested", sessionId: "s1", questions: [{ id: "q1", question: "选择方案", options: [{ label: "方案 A（Recommended）" }, { label: "方案 B" }] }] } });
