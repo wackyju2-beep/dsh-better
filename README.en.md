@@ -18,62 +18,60 @@ Restart DSH afterwards and the "Better DSH" entry appears in Settings.
 
 ## Features
 
-### Archived sessions
+Settings → Better DSH:
 
-Archived conversations never disappear — the stock UI just can't see them anymore. Here they all are:
-
-- browse each archive's title hints, working directory, archived time and local log state;
-- **Restore**: send it back to its original workspace slot and continue chatting;
-- **Delete for good**: wipe the archive together with its local log, leaving no ghost entries.
-
-Restores/deletes write straight through the open workspace persistence layer and reuse the gateway's own change events, so every open page converges live — no manual refresh needed.
-
-### Task notifications
-
-While the page stays open, a stopped task raises a **native system notification** (Windows toast / macOS / Linux desktop notification). Three triggers, each individually toggleable:
-
-- the agent asked a question or offered options (waiting for you);
-- the task finished normally;
-- the task stopped with an error.
-
-Under the hood, session-lifecycle callbacks are wrapped **reversibly** to observe state changes: stopping the plugin restores every wrapped prototype method and clears internal state, leaving no stray observers behind.
-
-### Update checker
-
-Compares your local dsh against the latest GitHub release (full semver rules, prereleases included):
-
-- auto-detects the install kind and checkout directory: walk up from the running entry to the nearest `@deepseek-ai/dsh` package → pnpm global store → conventional-path scan; override manually with the `DSH_BETTER_REPO_ROOT` environment variable;
-- ships two copy-ready command groups: the npm one (e.g. `npm install -g @deepseek-ai/dsh@latest`) and the source-build one;
-- latest-release facts come through a three-tier chain (Releases API → releases list → cross-host atom feed) with a 5-minute cache, a 24-hour stale fallback and a failure fast path — the panel keeps working when GitHub hiccups;
-- pops up an independent terminal window at your checkout with one click; you paste the commands yourself.
-
-### Model routing
-
-Route sessions to a target model by keyword rules (design ported from [dsh-model-router](https://github.com/superboy911/dsh-model-router), trimmed to what was needed):
-
-- rules match user messages in order; the first hit wins, and a miss changes nothing;
-- a target is a provider / model / reasoning-effort triple, **exact-validated against the live registry** before anything is written — retired or unknown combos are refused outright;
-- an optional `model_route` tool lets the agent switch models mid-conversation, strictly within combinations listed one by one in an allowlist.
+- **Archived sessions** — list every archived conversation (title hints, working directory, archived time, local log state); restore it to its original workspace slot and keep chatting, or delete it for good together with its local log;
+- **Task notifications** — while the page stays open, a stopped task raises a **native system notification** (Windows toast / macOS / Linux desktop notification): agent question or options, task finished, task errored — each trigger individually toggleable;
+- **Update checker** — compares your local dsh against the latest GitHub release (full semver rules); copy-ready update commands, or pop up an independent terminal at your checkout and paste them yourself;
+- **Model routing** — keyword rules match user messages in order; the first hit switches the session to the target provider / model / reasoning effort; an optional `model_route` tool lets the agent switch models mid-conversation (design ported from [dsh-model-router](https://github.com/superboy911/dsh-model-router), trimmed to what was needed);
+- **Message scroll nav** — a 1:1 port of the [chat.deepseek.com](https://chat.deepseek.com) scroll nav: one tick per message you sent, hover to preview, click to jump; colors customizable in its settings page.
 
 Every configuration change applies live — no restart needed.
 
-### Message scroll nav
-
-A 1:1 port of the [chat.deepseek.com](https://chat.deepseek.com) scroll nav, docked at the conversation's right edge:
-
-- every message you sent (steering included) maps to one tick line on a blurred pill track;
-- hovering pops up a **preview panel**: one row pairs with one tick, the wheel scrolls when it overflows, with gradient fades at the scrollable edges;
-- clicking a row jumps straight to that message; the message currently in view carries an enlarged brand-colored active tick;
-- follows the light/dark theme by default;
-- explicit colors are customizable in its settings page — applied live.
-
 ## How it works
 
-A standard dual-half plugin:
+A standard dual-half plugin: the **host half** runs inside the Node backend process and registers a set of loopback-only `/api/dsh-better/*` exact API routes; the **browser half** loads per page, injects the settings UI, and talks to the host over those routes.
 
-- the **host half** runs inside the Node backend process and registers a set of loopback-only exact API routes; the **browser half** loads per page and injects the UI into the settings screen;
-- three security fences: loopback peers only, a `Host` header check (anti DNS-rebinding), and POST bodies must declare `application/json` (a cross-site "simple request" cannot forge that header, and these routes never answer CORS preflights);
-- everything is resolved against the running dsh runtime at load time: any missing piece disables just its own feature with a warning instead of breaking backend startup.
+Everything is resolved against the running dsh runtime at load time: dsh-better is loaded through a symlinked directory and cannot statically `import "@deepseek-ai/*"`, so the host half resolves the host modules it needs with the running entry as the anchor — the same build artifacts as the running instance. Any missing piece disables just its own feature with a warning instead of breaking backend startup.
+
+Three security fences: loopback peers only; a `Host` header check (anti DNS-rebinding); and POST bodies must declare `application/json` — a cross-site "simple request" cannot forge that header, and these routes never answer CORS preflights, so a forged page can't touch your archives.
+
+### Archived sessions
+
+- Restores/deletes write straight through the open workspace persistence layer. Archiving never touches workspace bookkeeping, so restoring is exact: remove the session from the global archive set and it lands back in its original workspace slot;
+- deleting wipes the local `.jsonl` session log and removes the session from the workspace records and the archive set; a live session refuses deletion (`session-live`);
+- every change writes straight into the persisted workspace domain, and the browser converges instantly through the gateway's existing `domain/changed` forwarding — every open page, no manual refresh.
+
+### Task notifications
+
+- Built on the standard browser Notification API — cross-platform by construction (Windows toast / macOS Notification Center / Linux freedesktop desktop notifications, with the DeepSeek whale icon); notifications naturally stop when the page closes, an inherent boundary of that API;
+- the notification engine observes the event stream by wrapping two frame entry points of the session runtime, **reversibly**: it only watches from the side and never alters dispatch; stopping the plugin restores every wrapped prototype method and clears internal state (the wrapper carries a marker so re-enabling can't stack layers), leaving no stray observers behind;
+- a session that dies while its question is pending no longer swallows completion notifications forever (pending registrations clear when a new run starts); subagent child sessions don't re-notify by default;
+- permission, the master toggle and the three trigger toggles live in browser-local localStorage.
+
+### Update checker
+
+- **Directory discovery chain** (memoized in-process): explicit `DSH_BETTER_REPO_ROOT` → walk up from the running entry (`argv[1]`) and cwd to the nearest `@deepseek-ai/dsh` package.json (hits both source runs and packaged installs) → the pnpm global store next to the node executable → a conventional-path scan of `<drive>:\.dsh\deepseek-harness`. A path containing node_modules means "packaged install"; an apps/cli layout means "source build"; the drive scan and pnpm probing are Windows-only and silently skipped on unix;
+- **three-tier release sources**, first available wins: `/releases/latest` (that endpoint excludes prereleases — a 404 is expected when every upstream release is a prerelease) → the `/releases` list's first non-draft entry (one retry) → the `github.com/<repo>/releases.atom` feed (a different host — the independent path when api.github.com is down entirely; one retry). Per-request timeout of 9 seconds; successes cache for 5 minutes; if everything fails within 24 hours of a success, the stale value is shown with a "cached data (may be outdated)" badge — stale data beats a blank error;
+- update checks run off the shared serial queue, with concurrency dedupe and a failure cache: the panel keeps working when GitHub hiccups, and nothing else gets blocked;
+- version comparison follows full semver rules (`0.1.1-rc.2 < 0.1.1`, numeric prerelease identifiers compare numerically); the comparator is exported separately for testing;
+- **terminal popup**: on Windows, `cmd /d /s /c start` gives the inner cmd a brand-new console — dodging the pitfall where `detached: true` equals `DETACHED_PROCESS` and a console program gets no console at all; macOS uses `open -a Terminal`; Linux tries x-terminal-emulator / gnome-terminal / konsole / xfce4-terminal in order, using a 250ms error-race to tell a "missing program" from a real launch, with late errors parked on a no-op listener so they can't take the backend down. The window is fully independent of the backend lifecycle, never managed or killed by it; you paste the commands yourself — the plugin never types for you.
+
+### Model routing
+
+- The engine's pure functions — rule matching, target validation — are line-for-line identical to the original [dsh-model-router](https://github.com/superboy911/dsh-model-router); configuration persists in its own settings namespace `better-model-router` (deliberately distinct from the original plugin, so the two can coexist);
+- rules match user message text in order, **first hit wins; a miss changes nothing**. Before anything is written, the target is exact-validated against the live DSH registry (provider must be active, model must resolve, reasoning effort must be supported); a failed validation writes nothing; dormant targets can be saved but never execute;
+- subagent sessions don't apply session-header selections by default; the engine lazily installs the official selection assembly so keyword rules take effect on the subagent's first request;
+- the optional `model_route` tool (off by default): once enabled, the agent may switch the current session's model mid-conversation, strictly within combinations listed one by one in an allowlist, and every execution is re-validated live; with an empty allowlist no tool is registered; the chat stream shows a matching routing card;
+- read-only routes run off the shared serial queue, rule targets validate in parallel, and upstream requests carry timeout caps — opening the routing page never drags the rest down; saves use a version-number optimistic lock and clearly report conflicts when the config changed in another window.
+
+### Message scroll nav
+
+- The scroll nav's class names and layout were reverse-engineered from chat.deepseek.com's production stylesheet and rebuilt 1:1 as a blurred pill track;
+- ticks derive straight from the conversation snapshot: each `user` / `steering` (mid-run interjection) chat node maps to one tick, aligned by a stable anchor key onto the rendered message row;
+- one long-lived listener maintains every DOM-derived bit: the scroll listener binds once via capture-phase delegation (scrolls from any element reach it, and a scrollport swapped in mid-session retargets on its very first scroll), with a `ResizeObserver` following layout changes; the currently-read position is computed synchronously on every scroll — deliberately no rAF, which freezes in backgrounded windows and would leave the active tick stale;
+- clicking a tick scrolls the conversation scrollport onto the matching message row: while a running session is pinned to the bottom, the jump re-asserts itself for up to ~5 seconds until the position sticks, so streaming output can't drag the viewport back down; the preview panel folds a message into one line (truncated past 120 chars, image messages show placeholder text);
+- theme colors ride CSS `light-dark()` to follow light/dark automatically; custom colors persist in browser-local localStorage and apply live.
 
 And something we're a little proud of: the UI **follows dsh's original design language throughout** — colors, radii, spacing and typography all come from the active theme's semantic tokens, with zero third-party styling. Whatever theme you switch to, it blends in like a built-in page.
 
