@@ -24,7 +24,7 @@ Settings → Better DSH:
 - **Task notifications** — while the page stays open, a stopped task raises a **native system notification** (Windows toast / macOS / Linux desktop notification): agent question or options, task finished, task errored — each trigger individually toggleable;
 - **Update checker** — compares your local dsh against the latest GitHub release (full semver rules); copy-ready update commands, or pop up an independent terminal at your checkout and paste them yourself;
 - **Model routing** — keyword rules match user messages in order; the first hit switches the session to the target provider / model / reasoning effort; an optional `model_route` tool lets the agent switch models mid-conversation (design ported from [dsh-model-router](https://github.com/superboy911/dsh-model-router), trimmed to what was needed);
-- **Message scroll nav** — a 1:1 port of the [chat.deepseek.com](https://chat.deepseek.com) scroll nav: one tick per message you sent, hover to preview, click to jump; colors customizable in its settings page.
+- **Message scroll nav** — a 1:1 port of the [chat.deepseek.com](https://chat.deepseek.com) scroll nav: one tick per message you sent, hover to preview, click to jump; colors customizable in its settings page. **Off by default**; when enabled it takes over from the official built-in turn navigator, and toggling it off restores the official one.
 
 Every configuration change applies live — no restart needed.
 
@@ -67,10 +67,13 @@ Three security fences: loopback peers only; a `Host` header check (anti DNS-rebi
 
 ### Message scroll nav
 
+> **The official build now ships its own (off by default since v0.4.1)**: dsh 0.1.2-alpha.1 includes a built-in turn navigator (the per-turn tick rail at the conversation's right edge). This feature became an optional enhancement — off by default, leaving the official navigator untouched; once enabled, it temporarily hides the official navigator only while the tick rail is actually showing (conversation overflows and user messages are loaded), and the official one returns automatically whenever the toggle is off or the rail is dormant — no dead zone where both are invisible. The jump now uses the same mechanics as the official turn navigator (one instant position write, honored by the official scroll ledger), which also retires the long-standing "jump dragged back to the bottom while streaming" bug for good. The toggle applies live — no page reload needed.
+
 - The scroll nav's class names and layout were reverse-engineered from chat.deepseek.com's production stylesheet and rebuilt 1:1 as a blurred pill track;
 - ticks derive straight from the conversation snapshot: each `user` / `steering` (mid-run interjection) chat node maps to one tick, aligned by a stable anchor key onto the rendered message row;
 - one long-lived listener maintains every DOM-derived bit: the scroll listener binds once via capture-phase delegation (scrolls from any element reach it, and a scrollport swapped in mid-session retargets on its very first scroll), with a `ResizeObserver` following layout changes; the currently-read position is computed synchronously on every scroll — deliberately no rAF, which freezes in backgrounded windows and would leave the active tick stale;
-- clicking a tick scrolls the conversation scrollport onto the matching message row: while a running session is pinned to the bottom, the jump re-asserts itself for up to ~5 seconds until the position sticks, so streaming output can't drag the viewport back down; the preview panel folds a message into one line (truncated past 120 chars, image messages show placeholder text);
+- clicking a tick scrolls the conversation scrollport onto the matching message row instantly — the same mechanism the official turn navigator uses (a single scrollTop write; the official scroll ledger classifies it as programmatic rather than reader input and disengages bottom-follow on its own); the old 5-second heartbeat guard retired together with the official scroll-system rewrite;
+- hiding the official navigator never relies on build-time class names (officials are CSS-module hashes) — only the `nav` element inside the official scroll container; the plugin's own rail carries a dedicated marker and can never be caught by its own rule;
 - theme colors ride CSS `light-dark()` to follow light/dark automatically; custom colors persist in browser-local localStorage and apply live.
 
 And something we're a little proud of: the UI **follows dsh's original design language throughout** — colors, radii, spacing and typography all come from the active theme's semantic tokens, with zero third-party styling. Whatever theme you switch to, it blends in like a built-in page.
@@ -84,6 +87,7 @@ And something we're a little proud of: the UI **follows dsh's original design la
 | v0.3.0 | Model routing (ported from [dsh-model-router](https://github.com/superboy911/dsh-model-router)) |
 | v0.3.2 | First publish to npm; a round of fixes: reversible notification-engine wrapping, sessions that die mid-question no longer swallow completion notifications, a cross-site request fence (POST must declare JSON), update-check moved off the serial queue with concurrency dedupe and a failure cache, and model-routing hardening (upstream timeout caps, read-only routes off the serial queue, parallel rule validation, working in-subagent model switches, session-selection echo after save) |
 | v0.4.0 | Message scroll nav: chat.deepseek.com-style user-message ticks (hover to preview, click to jump) with customizable colors |
+| v0.4.1 | Adapted to the official 0.1.2-alpha.1 built-in turn navigator: the scroll nav is now off by default; enabling it temporarily takes over from the official navigator and toggling it off restores it; jumps use the official instant-write semantics, retiring the 5-second heartbeat guard |
 
 ## Feedback
 

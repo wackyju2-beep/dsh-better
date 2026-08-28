@@ -101,7 +101,13 @@ for (const key of ["sn.entry", "sn.entryDesc", "sn.title", "sn.enable", "sn.colo
 if (!createdElements.some((el) => typeof el._t === "string" && el._t.includes(".dtb_sn"))) {
 	throw new Error("scroll nav stylesheet (.dtb_sn*) was not installed");
 }
-console.log("scroll nav OK: shell.overlay entry, sn.* locale keys, .dtb_sn styles");
+// v0.4.1: the official-navigator replacement rule must ship in the stylesheet,
+// and the rail must be excluded from it via its own marker attribute.
+const snSheet = createdElements.find((el) => typeof el._t === "string" && el._t.includes(".dtb_sn"))._t;
+if (!snSheet.includes('[data-dsh-better-sn="1"] [data-conversation-scroll] nav:not([data-dsh-better-sn]){display:none!important}')) {
+	throw new Error("official-navigator kill-switch rule missing from stylesheet");
+}
+console.log("scroll nav OK: shell.overlay entry, sn.* locale keys, .dtb_sn styles, official-navigator kill-switch");
 
 // Frame observation through the WRAPPED prototype
 proto.handleMuxEnvelope({ payload: { type: "question/requested", sessionId: "s1", questions: [{ id: "q1", question: "选择方案", options: [{ label: "方案 A（Recommended）" }, { label: "方案 B" }] }] } });
