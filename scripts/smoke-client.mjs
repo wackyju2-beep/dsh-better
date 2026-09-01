@@ -122,7 +122,8 @@ for (const key of ["hb.entry", "hb.entryDesc", "hb.title", "hb.intro", "hb.enabl
 	"sc.save", "sc.saved", "sc.conflict", "sc.invalid", "sc.dirty",
 	"sc.statusTitle", "sc.lastHeartbeat", "sc.lastCron", "sc.lastResult",
 	"sc.runsTitle", "sc.runsEmpty", "sc.runTriggerHb", "sc.runTriggerCr",
-	"sc.runFail", "sc.runInjected", "sc.unavailable"]) {
+	"sc.runFail", "sc.runInjected", "sc.unavailable",
+	"sc.timeHour", "sc.timeMinute", "sc.showTitles", "sc.showCodes"]) {
 	if (!(key in dict.zh)) throw new Error("missing zh locale key: " + key);
 	if (!(key in dict.en)) throw new Error("missing en locale key: " + key);
 }
