@@ -95,10 +95,14 @@ const snInjected = snEntry.opts.inject();
 if (snInjected.ctx !== ctx) throw new Error("ctx missing from scroll nav inject face");
 for (const key of ["sn.entry", "sn.entryDesc", "sn.title", "sn.enable", "sn.colors",
 	"sn.trackColor", "sn.trackOpacity", "sn.tickColor", "sn.tickOpacity",
-	"sn.hoverColor", "sn.activeColor", "sn.panelColor", "sn.customColorsDesc", "sn.imageFallback"]) {
+	"sn.hoverColor", "sn.activeColor", "sn.panelColor", "sn.customColorsDesc", "sn.imageFallback",
+	"sn.jumpLoad", "sn.loadingTurn", "sn.turnN", "sn.unloadedTick"]) {
 	if (!(key in dict.zh)) throw new Error("missing zh locale key: " + key);
 	if (!(key in dict.en)) throw new Error("missing en locale key: " + key);
 }
+if (!dict.zh["sn.jumpLoad"].includes("{turn}")) throw new Error("sn.jumpLoad must carry the {turn} placeholder");
+if (!dict.zh["sn.turnN"].includes("{turn}")) throw new Error("sn.turnN must carry the {turn} placeholder");
+if (!dict.zh["sn.loadingTurn"].includes("{turn}")) throw new Error("sn.loadingTurn must carry the {turn} placeholder");
 if (!createdElements.some((el) => typeof el._t === "string" && el._t.includes(".dtb_sn"))) {
 	throw new Error("scroll nav stylesheet (.dtb_sn*) was not installed");
 }
@@ -108,7 +112,80 @@ const snSheet = createdElements.find((el) => typeof el._t === "string" && el._t.
 if (!snSheet.includes('[data-dsh-better-sn="1"] [data-conversation-scroll] nav:not([data-dsh-better-sn]){display:none!important}')) {
 	throw new Error("official-navigator kill-switch rule missing from stylesheet");
 }
-console.log("scroll nav OK: shell.overlay entry, sn.* locale keys, .dtb_sn styles, official-navigator kill-switch");
+// v0.5.1: the unloaded/busy tick states ship in the stylesheet
+if (!snSheet.includes(".dtb_sn_row[data-unloaded='1']")) throw new Error("unloaded tick rule missing from stylesheet");
+if (!snSheet.includes(".dtb_sn_row[data-busy='1'] .dtb_sn_tick")) throw new Error("busy tick rule missing from stylesheet");
+if (!snSheet.includes("@keyframes dtb_sn_pulse")) throw new Error("busy pulse keyframes missing from stylesheet");
+console.log("scroll nav OK: shell.overlay entry, sn.* locale keys, .dtb_sn styles, official-navigator kill-switch, unloaded/busy tick states");
+
+// v0.5.1 turn ladder: the pure merge/deduction helpers, exercised through the
+// exported __snPure test seam.
+{
+	const pure = mod.__snPure;
+	if (pure === undefined) throw new Error("__snPure test seam not exported");
+	const t = (key) => key;
+	// outlineEntry: wire narrowing — turn/seq are load-bearing, previews degrade
+	if (pure.outlineEntry({ turn: 0, seq: 4, prompt: "p", response: "r" })?.seq !== 4) throw new Error("outlineEntry should keep a valid entry");
+	if (pure.outlineEntry({ turn: -1, seq: 4 }) !== undefined) throw new Error("outlineEntry must drop negative turn");
+	if (pure.outlineEntry({ turn: 1.5, seq: 4 }) !== undefined) throw new Error("outlineEntry must drop fractional turn");
+	if (pure.outlineEntry({ turn: 3 }) !== undefined) throw new Error("outlineEntry must drop a seq-less entry");
+	if (pure.outlineEntry({ turn: 3, seq: 9, prompt: 42 })?.prompt !== "") throw new Error("outlineEntry must degrade a malformed preview to empty string");
+
+	// mergeItems: unloaded outline entries first, loaded items override with
+	// the live anchor and borrow previews where the window's own is empty.
+	const merged = pure.mergeItems(
+		[
+			{ turn: 2, key: "k2", prompt: "", response: "win-r2" },
+			{ turn: 3, key: "k3", prompt: "win-p3", response: "win-r3" },
+		],
+		[
+			{ turn: 3, seq: 30, prompt: "out-p3", response: "out-r3" },
+			{ turn: 4, seq: 40, prompt: "out-p4", response: "out-r4" },
+			{ turn: 0, seq: 2, prompt: "out-p0", response: "out-r0" },
+		],
+	);
+	const turns = merged.map((m) => m.turn).join(",");
+	if (turns !== "0,2,3,4") throw new Error("mergeItems must ascend by turn, got: " + turns);
+	if (merged[0].anchor.kind !== "unloaded" || merged[0].anchor.seq !== 2) throw new Error("outline-only turn must stay unloaded with its seq");
+	if (merged[1].anchor.kind !== "loaded" || merged[1].anchor.key !== "k2") throw new Error("loaded item must override the outline anchor");
+	if (merged[1].prompt !== "out-p3" && merged[1].turn === 2) { /* turn 2 had no outline entry: stays empty */ }
+	if (merged[2].prompt !== "win-p3" || merged[2].response !== "win-r3") throw new Error("loaded previews must win when non-empty");
+	if (merged[3].prompt !== "out-p4" || merged[3].response !== "out-r4") throw new Error("outline previews must fill unloaded turns");
+	// mergeItems: no outline → loaded only (old-host degradation)
+	const loadedOnly = pure.mergeItems([{ turn: 1, key: "k1", prompt: "p", response: "r" }], undefined);
+	if (loadedOnly.length !== 1 || loadedOnly[0].anchor.kind !== "loaded") throw new Error("mergeItems without outline must keep loaded items only");
+
+	// loadedTurnItems: navigation-index host yields official items
+	const navChat = {
+		chat: {
+			navigation: { items: () => [
+				{ turn: 0, anchorKey: "a0", prompt: "p0", response: "r0" },
+				{ turn: 1, anchorKey: "a1", prompt: "p1", response: "r1" },
+			] },
+			order: [], nodes: { get: () => undefined },
+		},
+	};
+	const navItems = pure.loadedTurnItems(navChat, t);
+	if (navItems.length !== 2 || navItems[0].key !== "a0" || navItems[1].turn !== 1) throw new Error("loadedTurnItems must map navigation.items()");
+
+	// loadedTurnItems: legacy host (no navigation) walks user/steering messages
+	const legacyChat = {
+		chat: {
+			order: ["n1", "n2", "n3"],
+			nodes: {
+				get: (key) => key === "n1"
+					? { key: "n1", kind: "user", visibility: "visible", data: { content: [{ type: "text", text: "你好" }] } }
+					: key === "n3"
+						? { key: "n3", kind: "assistant-step", visibility: "visible", data: {} }
+						: { key: "n2", kind: "user", visibility: "hidden", data: { content: [] } },
+			},
+		},
+	};
+	const legacyItems = pure.loadedTurnItems(legacyChat, t);
+	if (legacyItems.length !== 1 || legacyItems[0].key !== "n1" || legacyItems[0].turn !== 0) throw new Error("legacy walk must yield visible user messages with ordinal turns");
+	if (legacyItems[0].prompt !== "你好") throw new Error("legacy walk must keep the message preview");
+}
+console.log("turn ladder OK: outlineEntry narrowing, mergeItems semantics, loadedTurnItems (navigation + legacy)");
 
 // Heartbeat & scheduled tasks (v0.5.0): dictionary keys, settings-section
 // entries, and the scheduler stylesheet
