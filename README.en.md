@@ -6,6 +6,8 @@ Better DSH — a dual-half plugin (host + browser) that follows the DeepSeek Har
 
 [中文](README.md) · English
 
+This plugin is listed on **dsh-market** — you can discover and install it right from the marketplace.
+
 ## Install
 
 Published on npm — one terminal command installs it into your dsh profile:
@@ -75,8 +77,14 @@ One page manages any number of tasks (capped at 20), each with its own name, swi
 - **two target kinds**: "main workspace root (internal patrol)" = inject into the newest live root sessions under that workspace (capped at 5; when none is live, the newest one is woken up); "specific session" = inject into that session only. A target that is not in memory (fresh backend restart, never opened in a browser) is **cold-resumed** through the official `sessionController` resume path and then injected — exactly equivalent to opening it in the web app and sending a message yourself; the accepted cost is that woken sessions stay resident;
 - prompts support the `{time}` placeholder (replaced with the delivery time) and fall back to a default patrol prompt when blank; messages carry a plugin source, the same delivery mechanism the official schedule reminders use;
 - the fixed time is picked from hour/minute dropdowns; the session-target dropdown shows conversation **titles** by default (same source as the archive page, with a short-code suffix) and toggles to a path+code compact mode; every dropdown uses the native dsh Menu style and tracks light/dark themes;
-- the page shows a per-task countdown to the next fire plus a shared log of the last 20 runs (task name, injection result, failure reason); a v0.5.0 single-task config migrates automatically into the task list with its runtime timers preserved;
+- the page shows a per-task countdown to the next fire plus a shared log of the last 20 runs (task name, injection result, failure reason);
 - firing consumes tokens: an injected session really runs a model turn — size your intervals accordingly.
+
+Three implementation notes:
+
+- **config & migration**: the task table lives as a whole in a dedicated settings namespace `better-scheduler` (`{ version: 2, tasks: […] }`, capped at 20); saving uses a version-number optimistic lock and clearly reports conflicts when the config changed elsewhere; the host subscribes via `scope.watch`, so every task re-arms live after each save — no restart. Old single-task configs (separate heartbeat / fixed-time entries) migrate automatically into the task list on read — configured ones keep their original timers, never-configured installs migrate to an empty table;
+- **scheduling core**: a minute-level tick reconciles all tasks every minute; each task owns a private ledger (last run, next fire, fixed-time minute-dedupe key), and the timing baseline resets only when a task first appears or flips off → on — editing its name/prompt/target never restarts its rhythm, and deleting a task clears its ledger. "Every N minutes from the moment it's enabled", "at most once per minute" and "missing dates are skipped" all derive from this ledger — no browser required, no system cron either;
+- **delivery path**: every task shares one delivery chain — resolve the target sessions, fetch their agents through the official `sessionController.resolveAgent` (cold-resuming the standard way when a target is not in memory), then inject the user message via `agent.followup`; a main-workspace-root target matches live root sessions by cwd (capped at 5) and delivers to each. "Run once" on the page walks this very chain — an end-to-end rehearsal of the production delivery.
 
 ### Message scroll nav
 
@@ -101,7 +109,7 @@ And something we're a little proud of: the UI **follows dsh's original design la
 | v0.3.2 | First publish to npm; a round of fixes: reversible notification-engine wrapping, sessions that die mid-question no longer swallow completion notifications, a cross-site request fence (POST must declare JSON), update-check moved off the serial queue with concurrency dedupe and a failure cache, and model-routing hardening (upstream timeout caps, read-only routes off the serial queue, parallel rule validation, working in-subagent model switches, session-selection echo after save) |
 | v0.4.0 | Message scroll nav: chat.deepseek.com-style user-message ticks (hover to preview, click to jump) with customizable colors |
 | v0.4.1 | Adapted to the official 0.1.2-alpha.1 built-in turn navigator: the scroll nav is now off by default; enabling it hides the official navigator globally (every conversation, live toggle) and toggling off restores it everywhere; jumps use the official instant-write semantics, retiring the 5-second heartbeat guard |
-| v0.5.0 | Scheduled tasks (multi-task, OpenClaw-style): one task page holds any number of tasks (each with its own name, switch, prompt, and target — an interval heartbeat or a daily/weekly/monthly fixed time), appended via a New-task button; targets are the main workspace root (internal patrol, capped at 5, cold-fallback wakes the newest session) or any specific session (shown by conversation title by default, cold-resumed through the official sessionController, then injected); all dropdowns and the time picker use the native dsh Menu style; the scheduler runs in the dsh backend process, no browser needed; with a run log and run-once-now |
+| v0.5.0 | Scheduled tasks (multi-task, OpenClaw-style): one page holds any number of interval heartbeats and fixed-time triggers, running inside the dsh backend process — no browser needed; session targets show conversation titles by default; old single-task configs migrate automatically |
 
 ## Feedback
 
