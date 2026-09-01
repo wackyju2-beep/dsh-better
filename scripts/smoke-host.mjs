@@ -64,6 +64,23 @@ const llmStub = {
 	resolveCallConfig: async (config) => config,
 };
 
+// ── scheduler stub services ──────────────────────────────────────────────────
+// followup receipts + a resolveAgent that cold-resumes two session ids.
+const followups = [];
+const coldAgents = new Map();
+const liveAgents = new Map();
+function makeFakeAgent(id, cwd) {
+	const agent = {
+		id,
+		followup: (message) => { followups.push({ agent: id, message }); },
+		session: { header: { id, cwd, createdAt: Date.parse("2026-01-01T00:00:00Z") } },
+	};
+	return agent;
+}
+for (const id of ["session-ws1-a", "session-ws1-b"]) liveAgents.set(id, makeFakeAgent(id, "C:/proj"));
+coldAgents.set("session-cold", makeFakeAgent("session-cold", "C:/proj"));
+coldAgents.set("session-cold2", makeFakeAgent("session-cold2", "D:/elsewhere"));
+
 // Real host builds for the router's runtime seams; skipped gracefully when
 // this checkout is not present (the ready-path tests then report and stop).
 let zReal;
@@ -134,6 +151,11 @@ if (zReal !== undefined && canonicalHeaderReal !== undefined) {
 	if (installModelSelectionReal !== undefined) mod.testHooks.seedAppModule("@deepseek-ai/dsh-agent", { installModelSelection: installModelSelectionReal });
 	mod.testHooks.seedAppModule("@deepseek-ai/schemastery", { default: zReal });
 }
+// Scheduler: seed a minimal createUserMessage so delivery does not depend on
+// the real dsh-llm build being importable from this checkout.
+mod.testHooks.seedAppModule("@deepseek-ai/dsh-llm", {
+	createUserMessage: (input) => ({ id: "smoke-" + Math.random().toString(36).slice(2), role: "user", ...input }),
+});
 
 
 const dir = await mkdtemp(join(tmpdir(), "dsh-better-test-"));
@@ -171,7 +193,29 @@ const ctx = {
   get(service) {
     if (service === "sessions") return { get: (id) => id === "s-live" ? { id } : undefined };
     if (service === "llm") return llmStub;
-    if (service === "agents") return { list: () => [fakeAgent], get: (id) => String(id) === "session-main" ? fakeAgent : undefined };
+    if (service === "agents") return {
+      list: () => [fakeAgent],
+      get: (id) => {
+        if (String(id) === "session-main") return fakeAgent;
+        return liveAgents.get(String(id)) ?? coldAgents.get(String(id));
+      },
+      roots: () => [...liveAgents.values(), ...coldAgents.values()],
+    };
+    if (service === "sessionController") {
+      return {
+        resolveAgent: async (sessionId) => {
+          const id = String(sessionId);
+          const cold = coldAgents.get(id);
+          if (cold !== undefined) return { agent: cold };
+          return { error: { message: "session not found: " + id } };
+        },
+      };
+    }
+    if (service === "workspaceRegistry") {
+      return {
+        list: () => [{ id: "w1", path: "C:/proj", title: "proj", sessionIds: ["session-ws1-a", "session-ws1-b", "session-cold"] }],
+      };
+    }
     if (service === "tools") return { register: (def) => { registeredTools.push(def); return () => {}; } };
     if (service === "agentDefaultModel") return { currentSelection: () => ({ provider: "deepseek-official", model: "deepseek-v4-flash" }) };
     if (service === "sessionPersistence") return {
@@ -179,6 +223,10 @@ const ctx = {
       locate: (header) => header.id === "s-archived" ? { kind: "jsonl", path: artifact }
         : header.id === "s-gone" ? { kind: "jsonl", path: artifactGone } : undefined,
       list: async () => [
+        { id: "session-ws1-a", cwd: "C:/proj", createdAt: Date.parse("2026-02-03T04:05:06Z") },
+        { id: "session-ws1-b", cwd: "C:/proj", createdAt: Date.parse("2026-02-01T04:05:06Z") },
+        { id: "session-cold", cwd: "C:/proj", createdAt: Date.parse("2026-01-03T04:05:06Z") },
+        { id: "session-cold2", cwd: "D:/elsewhere", createdAt: Date.parse("2026-01-02T04:05:06Z") },
         { id: "s-archived", cwd: "C:/proj", createdAt: Date.parse("2026-02-03T04:05:06Z") },
         { id: "s-gone", cwd: "C:/proj", createdAt: Date.parse("2026-01-03T04:05:06Z") },
       ],
@@ -654,6 +702,251 @@ await new Promise((r) => setTimeout(r, 10));
 		routes.get(mod.ROUTER_SAVE_PATH)(foreignReq, postRes);
 		assert.equal(postRes.statusCode, 403);
 		console.log("router loopback fence holds");
+	}
+}
+
+// ── heartbeat & scheduled tasks: pure logic tables ───────────────────────────
+{
+	// parseSchedulerClock
+	assert.equal(mod.parseSchedulerClock("09:07"), "09:07");
+	assert.equal(mod.parseSchedulerClock(" 23:59 "), "23:59");
+	assert.equal(mod.parseSchedulerClock("24:00"), null);
+	assert.equal(mod.parseSchedulerClock("9:07"), null);
+	assert.equal(mod.parseSchedulerClock(""), null);
+	assert.equal(mod.parseSchedulerClock(undefined), null);
+
+	// schedulerCronKey: local wall-clock minute identity
+	const sample = Date.parse("2026-03-15T10:30:00Z");
+	assert.equal(mod.schedulerCronKey(sample).length, 16);
+	assert.equal(mod.schedulerCronKey(sample), mod.schedulerCronKey(sample + 30 * 1000));
+	assert.notEqual(mod.schedulerCronKey(sample), mod.schedulerCronKey(sample + 61 * 1000));
+
+	// computeNextCronAt: daily always tomorrow-or-today at HH:mm
+	const from = new Date();
+	from.setHours(10, 0, 0, 0);
+	const fromMs = from.getTime();
+	const nextDaily = mod.computeNextCronAt({ kind: "daily", time: "09:00" }, fromMs);
+	assert.equal(nextDaily, fromMs + 23 * 3600 * 1000, "daily 09:00 after 10:00 fires tomorrow");
+	const nextDailyToday = mod.computeNextCronAt({ kind: "daily", time: "11:00" }, fromMs);
+	assert.equal(nextDailyToday, fromMs + 1 * 3600 * 1000, "daily 11:00 after 10:00 fires today");
+	// weekly: fires on the configured weekday at HH:mm; anchor = next HH:mm
+	// occurrence, then advance whole days. Same weekday after its slot = 7 days.
+	const nextWeekly = mod.computeNextCronAt({ kind: "weekly", time: "09:00", day: from.getDay() }, fromMs);
+	assert.equal(nextWeekly - fromMs, (6 * 24 + 23) * 3600 * 1000, "same weekday 09:00 after 10:00 fires next week");
+	const otherDay = (from.getDay() + 3) % 7;
+	const nextWeeklyFar = mod.computeNextCronAt({ kind: "weekly", time: "09:00", day: otherDay }, fromMs);
+	// anchor tomorrow 09:00 (+23h), then (3-1+7)%7 = 2 more days
+	assert.equal(nextWeeklyFar - fromMs, (2 * 24 + 23) * 3600 * 1000);
+	// monthly: Feb 30 must not overflow into March 2
+	const feb = mod.computeNextCronAt({ kind: "monthly", time: "09:00", date: 30 }, Date.parse("2026-02-01T10:00:00"));
+	const febDate = new Date(feb);
+	assert.equal(febDate.getFullYear() === 2026 || febDate.getFullYear() === 2027, true);
+	assert.equal(febDate.getDate(), 30, "never overflows to a wrong date");
+	// malformed
+	assert.equal(mod.computeNextCronAt({ kind: "daily", time: "99:99" }, fromMs), null);
+	assert.equal(mod.computeNextCronAt({ kind: "off", time: "09:00" }, fromMs), null);
+	console.log("scheduler time tables OK");
+
+	// cronMatchesNow honors weekday/date only at the exact minute
+	const monday = Date.parse("2026-03-16T09:07:00"); // a Monday, local
+	assert.equal(mod.cronMatchesNow({ kind: "daily", time: "09:07" }, monday), true);
+	assert.equal(mod.cronMatchesNow({ kind: "daily", time: "09:08" }, monday), false);
+	assert.equal(mod.cronMatchesNow({ kind: "weekly", time: "09:07", day: 1 }, monday), true);
+	assert.equal(mod.cronMatchesNow({ kind: "weekly", time: "09:07", day: 2 }, monday), false);
+	assert.equal(mod.cronMatchesNow({ kind: "monthly", time: "09:07", date: 16 }, monday), true);
+	assert.equal(mod.cronMatchesNow({ kind: "monthly", time: "09:07", date: 15 }, monday), false);
+	console.log("cronMatchesNow table OK");
+
+	// resolveSchedulerConfig: clamps + rejections. Enabled cron with a bad
+	// time/shape THROWS (save → 400); disabled cron falls back leniently.
+	const cfg = mod.resolveSchedulerConfig({
+		heartbeat: { enabled: true, intervalMinutes: 2, prompt: "", target: { kind: "session", sessionId: "session-x" } },
+		cron: { enabled: false, schedule: { kind: "weekly", time: "7:5", day: 9 }, prompt: "x", target: { kind: "root" } },
+	});
+	assert.equal(cfg.heartbeat.intervalMinutes, 5, "interval clamped to 5");
+	assert.equal(cfg.cron.schedule.time, "09:00", "invalid time falls back when disabled");
+	assert.equal(cfg.cron.schedule.day, 6, "day clamped into 0..6");
+	assert.throws(() => mod.resolveSchedulerConfig({ cron: { enabled: true, schedule: { kind: "off" } } }), /触发类型/);
+	assert.throws(() => mod.resolveSchedulerConfig({ cron: { enabled: true, schedule: { kind: "daily", time: "7:5" } } }), /触发时间/);
+	assert.throws(() => mod.resolveSchedulerConfig({ heartbeat: { enabled: true, target: { kind: "session" } } }), /sessionId/);
+	console.log("resolveSchedulerConfig table OK");
+}
+
+// ── heartbeat & scheduled tasks: endpoint round-trips ────────────────────────
+{
+	for (const path of [mod.SCHED_SNAPSHOT_PATH, mod.SCHED_SAVE_PATH, mod.SCHED_RUN_PATH, mod.SCHED_TARGETS_PATH]) {
+		assert.ok(routes.has(path), "scheduler route registered: " + path);
+	}
+
+	// targets: workspaces + unclaimed sessions grouped, subagents never listed
+	{
+		const req = okReq("GET");
+		Object.defineProperty(req, "url", { value: mod.SCHED_TARGETS_PATH });
+		const res = makeRes();
+		routes.get(mod.SCHED_TARGETS_PATH)(req, res);
+		await new Promise((r) => setTimeout(r, 30));
+		assert.equal(res.statusCode, 200, res.body);
+		const body = JSON.parse(res.body);
+		assert.equal(body.ok, true);
+		assert.equal(body.mainRoot, "C:/proj");
+		const wsGroup = body.groups.find((g) => g.workspaceId === "w1");
+		assert.ok(wsGroup, "workspace group present");
+		// Cold sessions stay visible: registry membership ∩ persistence (3 here).
+		assert.equal(wsGroup.sessions.length, 3, "live + cold registry members listed");
+		const other = body.groups.find((g) => g.workspaceId === "");
+		assert.ok(other, "unclaimed sessions grouped under Others");
+		assert.ok(other.sessions.some((row) => row.id === "session-cold2"), "cold other-cwd session present");
+		assert.ok(other.sessions.some((row) => row.id === "s-gone"), "archived id still resolvable");
+		console.log("scheduler targets OK:", body.groups.map((g) => g.title + ":" + g.sessions.length).join(", "));
+	}
+
+	// save heartbeat config → runtime arms + run-now injects into live ws roots
+	{
+		const config = {
+			heartbeat: { enabled: true, intervalMinutes: 30, prompt: "巡检 {time}", target: { kind: "root", sessionId: "" } },
+			cron: { enabled: false, schedule: { kind: "off", time: "09:00", day: 1, date: 1 }, prompt: "", target: { kind: "root", sessionId: "" } },
+		};
+		const chunks = [Buffer.from(JSON.stringify({ value: config, expectedRevision: 0 }))];
+		const req = okReq("POST");
+		req.on = (ev, cb) => { if (ev === "data") cb(chunks[0]); if (ev === "end") cb(); };
+		const res = makeRes();
+		routes.get(mod.SCHED_SAVE_PATH)(req, res);
+		await new Promise((r) => setTimeout(r, 30));
+		assert.equal(res.statusCode, 200, res.body);
+		const body = JSON.parse(res.body);
+		assert.equal(body.ok, true, res.body);
+		assert.equal(body.config.heartbeat.enabled, true);
+		assert.equal(body.config.heartbeat.intervalMinutes, 30);
+		assert.equal(typeof body.runtime.nextHeartbeatAt, "number");
+		assert.equal(body.runtime.nextCronAt, null);
+
+		// run-now with root target: injects the LIVE agents under C:/proj
+		// (live-ws1-a/b from roots() + session-cold, whose cwd matches; the
+		// D:/elsewhere cold agent is excluded by cwd and only woken on demand)
+		const before = followups.length;
+		const chunks2 = [Buffer.from(JSON.stringify({ trigger: "heartbeat" }))];
+		const req2 = okReq("POST");
+		req2.on = (ev, cb) => { if (ev === "data") cb(chunks2[0]); if (ev === "end") cb(); };
+		const res2 = makeRes();
+		routes.get(mod.SCHED_RUN_PATH)(req2, res2);
+		await new Promise((r) => setTimeout(r, 60));
+		assert.equal(res2.statusCode, 200, res2.body);
+		const runBody = JSON.parse(res2.body);
+		assert.equal(runBody.ok, true, res2.body);
+		assert.equal(runBody.injected, 3, "all live C:/proj roots got the beat");
+		const injected = followups.slice(before);
+		assert.ok(injected.every((row) => row.agent !== "session-cold2"), "foreign-cwd agent excluded");
+		assert.ok(injected.every((row) => row.agent === "session-ws1-a" || row.agent === "session-ws1-b" || row.agent === "session-cold"));
+		assert.ok(injected.every((row) => row.message.source?.kind === "plugin" && row.message.source?.plugin === "dsh-better"));
+		assert.ok(injected[0].message.content[0].text.includes("巡检 "), "{time}-bearing prompt rendered");
+		assert.notEqual(injected[0].message.content[0].text.indexOf("{time}"), -1 ? true : false, "placeholder replaced");
+		assert.equal(injected[0].message.content[0].text.includes("{time}"), false, "placeholder must be replaced");
+		console.log("heartbeat run-now (root target) OK:", runBody.detail);
+
+		// revision conflict guard
+		{
+			const req3 = okReq("POST");
+			req3.on = (ev, cb) => { if (ev === "data") cb(Buffer.from(JSON.stringify({ value: config, expectedRevision: 0 }))); if (ev === "end") cb(); };
+			const res3 = makeRes();
+			routes.get(mod.SCHED_SAVE_PATH)(req3, res3);
+			await new Promise((r) => setTimeout(r, 30));
+			assert.equal(res3.statusCode, 409, res3.body);
+			console.log("scheduler save conflict OK");
+		}
+	}
+
+	// cron run-now against a cold session: sessionController wake + followup
+	{
+		const config = {
+			heartbeat: { enabled: false, intervalMinutes: 60, prompt: "", target: { kind: "root", sessionId: "" } },
+			cron: { enabled: true, schedule: { kind: "daily", time: "23:59", day: 1, date: 1 }, prompt: "定点任务", target: { kind: "session", sessionId: "session-cold" } },
+		};
+		const req = okReq("POST");
+		req.on = (ev, cb) => { if (ev === "data") cb(Buffer.from(JSON.stringify({ value: config, expectedRevision: 1 }))); if (ev === "end") cb(); };
+		const res = makeRes();
+		routes.get(mod.SCHED_SAVE_PATH)(req, res);
+		await new Promise((r) => setTimeout(r, 30));
+		assert.equal(res.statusCode, 200, res.body);
+		const body = JSON.parse(res.body);
+		assert.equal(typeof body.runtime.nextCronAt, "number", "cron armed after enable");
+		assert.equal(body.config.cron.schedule.time, "23:59");
+
+		const before = followups.length;
+		const req2 = okReq("POST");
+		req2.on = (ev, cb) => { if (ev === "data") cb(Buffer.from(JSON.stringify({ trigger: "cron" }))); if (ev === "end") cb(); };
+		const res2 = makeRes();
+		routes.get(mod.SCHED_RUN_PATH)(req2, res2);
+		await new Promise((r) => setTimeout(r, 60));
+		assert.equal(res2.statusCode, 200, res2.body);
+		const runBody = JSON.parse(res2.body);
+		assert.equal(runBody.ok, true, res2.body);
+		assert.equal(runBody.injected, 1, "cold session woken once");
+		assert.equal(followups[followups.length - 1].agent, "session-cold");
+		assert.equal(followups[followups.length - 1].message.content[0].text, "定点任务");
+		console.log("cron run-now (cold session wake) OK:", runBody.detail);
+	}
+
+	// run-now with an unknown session reports failure through the envelope
+	{
+		const config = {
+			heartbeat: { enabled: true, intervalMinutes: 60, prompt: "", target: { kind: "session", sessionId: "session-ghost" } },
+			cron: { enabled: false, schedule: { kind: "off", time: "09:00", day: 1, date: 1 }, prompt: "", target: { kind: "root", sessionId: "" } },
+		};
+		const req = okReq("POST");
+		req.on = (ev, cb) => { if (ev === "data") cb(Buffer.from(JSON.stringify({ value: config, expectedRevision: 2 }))); if (ev === "end") cb(); };
+		const res = makeRes();
+		routes.get(mod.SCHED_SAVE_PATH)(req, res);
+		await new Promise((r) => setTimeout(r, 30));
+		assert.equal(res.statusCode, 200, res.body);
+
+		const req2 = okReq("POST");
+		req2.on = (ev, cb) => { if (ev === "data") cb(Buffer.from(JSON.stringify({ trigger: "heartbeat" }))); if (ev === "end") cb(); };
+		const res2 = makeRes();
+		routes.get(mod.SCHED_RUN_PATH)(req2, res2);
+		await new Promise((r) => setTimeout(r, 60));
+		assert.equal(res2.statusCode, 200, res2.body);
+		const runBody = JSON.parse(res2.body);
+		assert.equal(runBody.ok, false);
+		assert.ok(String(runBody.detail).includes("唤醒失败"), "structured wake failure: " + runBody.detail);
+		console.log("run-now unknown-session failure OK:", runBody.detail);
+	}
+
+	// invalid configs rejected with 400
+	{
+		const post = (payloadObj) => {
+			const req = okReq("POST");
+			req.on = (ev, cb) => { if (ev === "data") cb(Buffer.from(JSON.stringify(payloadObj))); if (ev === "end") cb(); };
+			const res = makeRes();
+			routes.get(mod.SCHED_SAVE_PATH)(req, res);
+			return res;
+		};
+		let res = post({ value: { cron: { enabled: true, schedule: { kind: "off" } } }, expectedRevision: 3 });
+		await new Promise((r) => setTimeout(r, 30));
+		assert.equal(res.statusCode, 400, res.body);
+		res = post({ value: {}, expectedRevision: 3 });
+		await new Promise((r) => setTimeout(r, 30));
+		assert.equal(res.statusCode, 200, "blank config with defaults is valid: " + res.body);
+		res = post({ value: {}, expectedRevision: -1 });
+		await new Promise((r) => setTimeout(r, 30));
+		assert.equal(res.statusCode, 400, res.body);
+		res = post({});
+		await new Promise((r) => setTimeout(r, 30));
+		assert.equal(res.statusCode, 400, res.body);
+		console.log("scheduler save validation OK");
+	}
+
+	// loopback fence covers every scheduler route
+	{
+		const foreignGet = { method: "GET", socket: { remoteAddress: "192.168.1.9" }, headers: { host: "lan-box:3080" }, on() {} };
+		for (const path of [mod.SCHED_SNAPSHOT_PATH, mod.SCHED_TARGETS_PATH]) {
+			const res = makeRes();
+			routes.get(path)(foreignGet, res);
+			assert.equal(res.statusCode, 403);
+		}
+		const res = makeRes();
+		routes.get(mod.SCHED_RUN_PATH)(foreignReq, res);
+		assert.equal(res.statusCode, 403);
+		console.log("scheduler loopback fence holds");
 	}
 }
 
