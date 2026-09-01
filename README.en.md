@@ -6,7 +6,7 @@ Better DSH — a dual-half plugin (host + browser) that follows the DeepSeek Har
 
 [中文](README.md) · English
 
-This plugin is listed on **dsh-market** — you can discover and install it right from the marketplace.
+This plugin is listed on [dsh-market](https://github.com/dsh-market/dsh-market) — you can discover and install it right from the marketplace.
 
 ## Install
 

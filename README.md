@@ -6,7 +6,7 @@
 
 中文 · [English](README.en.md)
 
-本插件已上架 **dsh-market**，可以在市场插件里发现并下载。
+本插件已上架 [dsh-market](https://github.com/dsh-market/dsh-market)，可以在市场插件里发现并下载。
 
 ## 安装
 
