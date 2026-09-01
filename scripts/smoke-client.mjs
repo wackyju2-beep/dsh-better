@@ -123,7 +123,12 @@ for (const key of ["hb.entry", "hb.entryDesc", "hb.title", "hb.intro", "hb.enabl
 	"sc.statusTitle", "sc.lastHeartbeat", "sc.lastCron", "sc.lastResult",
 	"sc.runsTitle", "sc.runsEmpty", "sc.runTriggerHb", "sc.runTriggerCr",
 	"sc.runFail", "sc.runInjected", "sc.unavailable",
-	"sc.timeHour", "sc.timeMinute", "sc.showTitles", "sc.showCodes"]) {
+	"sc.timeHour", "sc.timeMinute", "sc.showTitles", "sc.showCodes",
+	"sc.entry", "sc.entryDesc", "sc.title", "sc.intro", "sc.newTask",
+	"sc.taskName", "sc.taskNamePlaceholder", "sc.taskType",
+	"sc.taskTypeHeartbeat", "sc.taskTypeCron", "sc.deleteTask",
+	"sc.deleteConfirm", "sc.maxTasks", "sc.enable", "sc.runOne",
+	"sc.tasksTitle", "sc.tasksEmpty"]) {
 	if (!(key in dict.zh)) throw new Error("missing zh locale key: " + key);
 	if (!(key in dict.en)) throw new Error("missing en locale key: " + key);
 }

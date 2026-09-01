@@ -757,19 +757,38 @@ await new Promise((r) => setTimeout(r, 10));
 	assert.equal(mod.cronMatchesNow({ kind: "monthly", time: "09:07", date: 15 }, monday), false);
 	console.log("cronMatchesNow table OK");
 
-	// resolveSchedulerConfig: clamps + rejections. Enabled cron with a bad
-	// time/shape THROWS (save → 400); disabled cron falls back leniently.
-	const cfg = mod.resolveSchedulerConfig({
+	// resolveSchedulerConfig (v2 task list): clamps + rejections. Enabled
+	// tasks with a bad time/shape THROW (save → 400); disabled fall back
+	// leniently. The v1 singleton shape is migrated transparently.
+	const cfg = mod.resolveSchedulerConfig({ version: 2, tasks: [
+		{ id: "hb1", type: "heartbeat", enabled: true, intervalMinutes: 2, prompt: "", target: { kind: "session", sessionId: "session-x" } },
+		{ id: "cr1", type: "cron", enabled: false, schedule: { kind: "weekly", time: "7:5", day: 9 }, prompt: "x", target: { kind: "root" } },
+	] });
+	assert.equal(cfg.tasks.length, 2);
+	assert.equal(cfg.tasks[0].intervalMinutes, 5, "interval clamped to 5");
+	assert.equal(cfg.tasks[1].schedule.time, "09:00", "invalid time falls back when disabled");
+	assert.equal(cfg.tasks[1].schedule.day, 6, "day clamped into 0..6");
+	assert.throws(() => mod.resolveSchedulerConfig({ version: 2, tasks: [{ id: "cr1", type: "cron", enabled: true, schedule: { kind: "off" } }] }), /触发类型/);
+	assert.throws(() => mod.resolveSchedulerConfig({ version: 2, tasks: [{ id: "cr2", type: "cron", enabled: true, schedule: { kind: "daily", time: "7:5" } }] }), /触发时间/);
+	assert.throws(() => mod.resolveSchedulerConfig({ version: 2, tasks: [{ id: "hb9", type: "heartbeat", enabled: true, target: { kind: "session" } }] }), /sessionId/);
+	assert.throws(() => mod.resolveSchedulerConfig({ version: 2, tasks: [{ id: "dup", type: "heartbeat" }, { id: "dup", type: "cron" }] }), /重复/);
+	assert.throws(() => mod.resolveSchedulerConfig({ version: 2, tasks: Array.from({ length: 21 }, (_, i) => ({ id: "t" + i, type: "heartbeat" })) }), /上限/);
+
+	// v1 singleton migration: configured rows keep enabled + ids; a pristine
+	// default namespace migrates to an EMPTY list (no placeholder tasks).
+	const migrated = mod.resolveSchedulerConfig({
 		heartbeat: { enabled: true, intervalMinutes: 2, prompt: "", target: { kind: "session", sessionId: "session-x" } },
 		cron: { enabled: false, schedule: { kind: "weekly", time: "7:5", day: 9 }, prompt: "x", target: { kind: "root" } },
 	});
-	assert.equal(cfg.heartbeat.intervalMinutes, 5, "interval clamped to 5");
-	assert.equal(cfg.cron.schedule.time, "09:00", "invalid time falls back when disabled");
-	assert.equal(cfg.cron.schedule.day, 6, "day clamped into 0..6");
-	assert.throws(() => mod.resolveSchedulerConfig({ cron: { enabled: true, schedule: { kind: "off" } } }), /触发类型/);
-	assert.throws(() => mod.resolveSchedulerConfig({ cron: { enabled: true, schedule: { kind: "daily", time: "7:5" } } }), /触发时间/);
-	assert.throws(() => mod.resolveSchedulerConfig({ heartbeat: { enabled: true, target: { kind: "session" } } }), /sessionId/);
-	console.log("resolveSchedulerConfig table OK");
+	assert.equal(migrated.version, 2);
+	assert.equal(migrated.tasks.length, 2, "both configured rows survive");
+	assert.equal(migrated.tasks[0].id, "hb0");
+	assert.equal(migrated.tasks[0].intervalMinutes, 5);
+	assert.equal(migrated.tasks[1].id, "cr0");
+	assert.equal(migrated.tasks[1].schedule.day, 6);
+	const blankMigrated = mod.resolveSchedulerConfig({});
+	assert.equal(blankMigrated.tasks.length, 0, "blank namespace migrates empty");
+	console.log("resolveSchedulerConfig (multi-task + migration) OK");
 }
 
 // ── heartbeat & scheduled tasks: endpoint round-trips ────────────────────────
@@ -800,12 +819,12 @@ await new Promise((r) => setTimeout(r, 10));
 		console.log("scheduler targets OK:", body.groups.map((g) => g.title + ":" + g.sessions.length).join(", "));
 	}
 
-	// save heartbeat config → runtime arms + run-now injects into live ws roots
+	// save task list → runtime arms + run-now injects into live ws roots
 	{
-		const config = {
-			heartbeat: { enabled: true, intervalMinutes: 30, prompt: "巡检 {time}", target: { kind: "root", sessionId: "" } },
-			cron: { enabled: false, schedule: { kind: "off", time: "09:00", day: 1, date: 1 }, prompt: "", target: { kind: "root", sessionId: "" } },
-		};
+		const config = { version: 2, tasks: [
+			{ id: "hb1", type: "heartbeat", name: "巡检", enabled: true, intervalMinutes: 30, prompt: "巡检 {time}", target: { kind: "root", sessionId: "" } },
+			{ id: "cr1", type: "cron", name: "定点", enabled: false, schedule: { kind: "off", time: "09:00", day: 1, date: 1 }, prompt: "", target: { kind: "root", sessionId: "" } },
+		] };
 		const chunks = [Buffer.from(JSON.stringify({ value: config, expectedRevision: 0 }))];
 		const req = okReq("POST");
 		req.on = (ev, cb) => { if (ev === "data") cb(chunks[0]); if (ev === "end") cb(); };
@@ -815,16 +834,18 @@ await new Promise((r) => setTimeout(r, 10));
 		assert.equal(res.statusCode, 200, res.body);
 		const body = JSON.parse(res.body);
 		assert.equal(body.ok, true, res.body);
-		assert.equal(body.config.heartbeat.enabled, true);
-		assert.equal(body.config.heartbeat.intervalMinutes, 30);
-		assert.equal(typeof body.runtime.nextHeartbeatAt, "number");
-		assert.equal(body.runtime.nextCronAt, null);
+		assert.equal(body.config.tasks.length, 2);
+		assert.equal(body.config.tasks[0].enabled, true);
+		assert.equal(body.config.tasks[0].intervalMinutes, 30);
+		const hb1 = body.runtime.tasks.find((row) => row.id === "hb1");
+		assert.equal(typeof hb1?.nextAt, "number", "hb1 armed");
+		assert.equal(body.runtime.tasks.find((row) => row.id === "cr1")?.nextAt, null);
 
 		// run-now with root target: injects the LIVE agents under C:/proj
 		// (live-ws1-a/b from roots() + session-cold, whose cwd matches; the
 		// D:/elsewhere cold agent is excluded by cwd and only woken on demand)
 		const before = followups.length;
-		const chunks2 = [Buffer.from(JSON.stringify({ trigger: "heartbeat" }))];
+		const chunks2 = [Buffer.from(JSON.stringify({ trigger: "heartbeat", taskId: "hb1" }))];
 		const req2 = okReq("POST");
 		req2.on = (ev, cb) => { if (ev === "data") cb(chunks2[0]); if (ev === "end") cb(); };
 		const res2 = makeRes();
@@ -857,10 +878,10 @@ await new Promise((r) => setTimeout(r, 10));
 
 	// cron run-now against a cold session: sessionController wake + followup
 	{
-		const config = {
-			heartbeat: { enabled: false, intervalMinutes: 60, prompt: "", target: { kind: "root", sessionId: "" } },
-			cron: { enabled: true, schedule: { kind: "daily", time: "23:59", day: 1, date: 1 }, prompt: "定点任务", target: { kind: "session", sessionId: "session-cold" } },
-		};
+		const config = { version: 2, tasks: [
+			{ id: "hb2", type: "heartbeat", name: "心跳", enabled: false, intervalMinutes: 60, prompt: "", target: { kind: "root", sessionId: "" } },
+			{ id: "cr2", type: "cron", name: "定点", enabled: true, schedule: { kind: "daily", time: "23:59", day: 1, date: 1 }, prompt: "定点任务", target: { kind: "session", sessionId: "session-cold" } },
+		] };
 		const req = okReq("POST");
 		req.on = (ev, cb) => { if (ev === "data") cb(Buffer.from(JSON.stringify({ value: config, expectedRevision: 1 }))); if (ev === "end") cb(); };
 		const res = makeRes();
@@ -868,12 +889,13 @@ await new Promise((r) => setTimeout(r, 10));
 		await new Promise((r) => setTimeout(r, 30));
 		assert.equal(res.statusCode, 200, res.body);
 		const body = JSON.parse(res.body);
-		assert.equal(typeof body.runtime.nextCronAt, "number", "cron armed after enable");
-		assert.equal(body.config.cron.schedule.time, "23:59");
+		const cr2 = body.runtime.tasks.find((row) => row.id === "cr2");
+		assert.equal(typeof cr2?.nextAt, "number", "cr2 armed after enable");
+		assert.equal(body.config.tasks[1].schedule.time, "23:59");
 
 		const before = followups.length;
 		const req2 = okReq("POST");
-		req2.on = (ev, cb) => { if (ev === "data") cb(Buffer.from(JSON.stringify({ trigger: "cron" }))); if (ev === "end") cb(); };
+		req2.on = (ev, cb) => { if (ev === "data") cb(Buffer.from(JSON.stringify({ trigger: "cron", taskId: "cr2" }))); if (ev === "end") cb(); };
 		const res2 = makeRes();
 		routes.get(mod.SCHED_RUN_PATH)(req2, res2);
 		await new Promise((r) => setTimeout(r, 60));
@@ -888,10 +910,10 @@ await new Promise((r) => setTimeout(r, 10));
 
 	// run-now with an unknown session reports failure through the envelope
 	{
-		const config = {
-			heartbeat: { enabled: true, intervalMinutes: 60, prompt: "", target: { kind: "session", sessionId: "session-ghost" } },
-			cron: { enabled: false, schedule: { kind: "off", time: "09:00", day: 1, date: 1 }, prompt: "", target: { kind: "root", sessionId: "" } },
-		};
+		const config = { version: 2, tasks: [
+			{ id: "hb3", type: "heartbeat", name: "心跳", enabled: true, intervalMinutes: 60, prompt: "", target: { kind: "session", sessionId: "session-ghost" } },
+			{ id: "cr3", type: "cron", name: "定点", enabled: false, schedule: { kind: "off", time: "09:00", day: 1, date: 1 }, prompt: "", target: { kind: "root", sessionId: "" } },
+		] };
 		const req = okReq("POST");
 		req.on = (ev, cb) => { if (ev === "data") cb(Buffer.from(JSON.stringify({ value: config, expectedRevision: 2 }))); if (ev === "end") cb(); };
 		const res = makeRes();
@@ -900,7 +922,7 @@ await new Promise((r) => setTimeout(r, 10));
 		assert.equal(res.statusCode, 200, res.body);
 
 		const req2 = okReq("POST");
-		req2.on = (ev, cb) => { if (ev === "data") cb(Buffer.from(JSON.stringify({ trigger: "heartbeat" }))); if (ev === "end") cb(); };
+		req2.on = (ev, cb) => { if (ev === "data") cb(Buffer.from(JSON.stringify({ trigger: "heartbeat", taskId: "hb3" }))); if (ev === "end") cb(); };
 		const res2 = makeRes();
 		routes.get(mod.SCHED_RUN_PATH)(req2, res2);
 		await new Promise((r) => setTimeout(r, 60));
@@ -920,12 +942,12 @@ await new Promise((r) => setTimeout(r, 10));
 			routes.get(mod.SCHED_SAVE_PATH)(req, res);
 			return res;
 		};
-		let res = post({ value: { cron: { enabled: true, schedule: { kind: "off" } } }, expectedRevision: 3 });
+		let res = post({ value: { version: 2, tasks: [{ id: "crX", type: "cron", enabled: true, schedule: { kind: "off" } }] }, expectedRevision: 3 });
 		await new Promise((r) => setTimeout(r, 30));
 		assert.equal(res.statusCode, 400, res.body);
-		res = post({ value: {}, expectedRevision: 3 });
+		res = post({ value: { version: 2, tasks: [] }, expectedRevision: 3 });
 		await new Promise((r) => setTimeout(r, 30));
-		assert.equal(res.statusCode, 200, "blank config with defaults is valid: " + res.body);
+		assert.equal(res.statusCode, 200, "empty task list is valid: " + res.body);
 		res = post({ value: {}, expectedRevision: -1 });
 		await new Promise((r) => setTimeout(r, 30));
 		assert.equal(res.statusCode, 400, res.body);

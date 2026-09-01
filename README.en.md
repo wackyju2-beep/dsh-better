@@ -2,7 +2,7 @@
 
 > **Unofficial community plugin.** Not affiliated with DeepSeek. Code produced by AI.
 
-Better DSH — a dual-half plugin (host + browser) that follows the DeepSeek Harness plugin conventions and adds a few handy tools to the dsh web GUI: archived-session management, system-level task notifications, an update checker, model routing, an OpenClaw-style heartbeat & scheduled tasks, and a DeepSeek-style message scroll nav. Everything lives under Settings → Better DSH, ready to use right after install.
+Better DSH — a dual-half plugin (host + browser) that follows the DeepSeek Harness plugin conventions and adds a few handy tools to the dsh web GUI: archived-session management, system-level task notifications, an update checker, model routing, multi-task scheduled triggers (heartbeats & fixed-time), and a DeepSeek-style message scroll nav. Everything lives under Settings → Better DSH, ready to use right after install.
 
 [中文](README.md) · English
 
@@ -24,8 +24,7 @@ Settings → Better DSH:
 - **Task notifications** — while the page stays open, a stopped task raises a **native system notification** (Windows toast / macOS / Linux desktop notification): agent question or options, task finished, task errored — each trigger individually toggleable;
 - **Update checker** — compares your local dsh against the latest GitHub release (full semver rules); copy-ready update commands, or pop up an independent terminal at your checkout and paste them yourself;
 - **Model routing** — keyword rules match user messages in order; the first hit switches the session to the target provider / model / reasoning effort; an optional `model_route` tool lets the agent switch models mid-conversation (design ported from [dsh-model-router](https://github.com/superboy911/dsh-model-router), trimmed to what was needed);
-- **Interval heartbeat** — an OpenClaw-style heartbeat: inject a prompt into a target session every N minutes to wake it for patrol/report duty; the target is the main workspace root (internal patrol) or any specific session;
-- **Scheduled tasks** — fixed-time triggers daily / weekly / monthly with a fully independent prompt and target, untouched by the heartbeat; both run inside the **dsh backend process** — **no browser needs to stay open**, the dsh service alone keeps them firing;
+- **Scheduled tasks** — multi-task scheduling: create any number of **interval heartbeats** (inject every N minutes, OpenClaw-style) and **fixed-time triggers** (daily / weekly / monthly at HH:mm); every task carries its own name, switch, schedule, prompt, and target; targets are the main workspace root (internal patrol) or any specific session. Everything runs inside the **dsh backend process** — **no browser needs to stay open**;
 - **Message scroll nav** — a 1:1 port of the [chat.deepseek.com](https://chat.deepseek.com) scroll nav: one tick per message you sent, hover to preview, click to jump; colors customizable in its settings page. **Off by default**; when enabled it takes over from the official built-in turn navigator, and toggling it off restores the official one.
 
 Every configuration change applies live — no restart needed.
@@ -67,16 +66,16 @@ Three security fences: loopback peers only; a `Host` header check (anti DNS-rebi
 - the optional `model_route` tool (off by default): once enabled, the agent may switch the current session's model mid-conversation, strictly within combinations listed one by one in an allowlist, and every execution is re-validated live; with an empty allowlist no tool is registered; the chat stream shows a matching routing card;
 - read-only routes run off the shared serial queue, rule targets validate in parallel, and upstream requests carry timeout caps — opening the routing page never drags the rest down; saves use a version-number optimistic lock and clearly report conflicts when the config changed in another window.
 
-### Heartbeat & scheduled tasks
+### Scheduled tasks (multi-task scheduling)
 
-Two independent triggers (own switch, interval/time, prompt, target) share one delivery path; the **scheduler runs entirely inside the dsh backend process — it keeps firing with the browser closed**:
+One page manages any number of tasks (capped at 20), each with its own name, switch, type, schedule, prompt, and target, sharing one delivery path. **The scheduler runs entirely inside the dsh backend process — it keeps firing with the browser closed**:
 
-- **Interval heartbeat**: injects every N minutes (min 5, default 60); when switched on, the interval counts from that moment;
-- **Fixed-time tasks**: fire at HH:mm daily / weekly / monthly (local time zone, at most once per minute); months lacking the configured date (Feb 30) are skipped, never overflowed into the next month;
+- **two types**: "interval heartbeat" injects every N minutes (min 5, default 60), counting from the moment it is enabled; "fixed time" fires at HH:mm daily / weekly / monthly (local time zone, at most once per minute); months lacking the configured date (Feb 30) are skipped, never overflowed into the next month;
+- **create / delete**: a "New task" button next to Save appends one task; each task card has its own "Run once" for end-to-end verification (manual firing works even while disabled) and a two-step-confirm delete;
 - **two target kinds**: "main workspace root (internal patrol)" = inject into the newest live root sessions under that workspace (capped at 5; when none is live, the newest one is woken up); "specific session" = inject into that session only. A target that is not in memory (fresh backend restart, never opened in a browser) is **cold-resumed** through the official `sessionController` resume path and then injected — exactly equivalent to opening it in the web app and sending a message yourself; the accepted cost is that woken sessions stay resident;
 - prompts support the `{time}` placeholder (replaced with the delivery time) and fall back to a default patrol prompt when blank; messages carry a plugin source, the same delivery mechanism the official schedule reminders use;
 - the fixed time is picked from hour/minute dropdowns; the session-target dropdown shows conversation **titles** by default (same source as the archive page, with a short-code suffix) and toggles to a path+code compact mode; every dropdown uses the native dsh Menu style and tracks light/dark themes;
-- the page shows a countdown to each next fire, the last 20 runs (trigger, injection result, failure reason), and a "Run once now" button for end-to-end verification (manual firing works even while disabled);
+- the page shows a per-task countdown to the next fire plus a shared log of the last 20 runs (task name, injection result, failure reason); a v0.5.0 single-task config migrates automatically into the task list with its runtime timers preserved;
 - firing consumes tokens: an injected session really runs a model turn — size your intervals accordingly.
 
 ### Message scroll nav
@@ -102,7 +101,7 @@ And something we're a little proud of: the UI **follows dsh's original design la
 | v0.3.2 | First publish to npm; a round of fixes: reversible notification-engine wrapping, sessions that die mid-question no longer swallow completion notifications, a cross-site request fence (POST must declare JSON), update-check moved off the serial queue with concurrency dedupe and a failure cache, and model-routing hardening (upstream timeout caps, read-only routes off the serial queue, parallel rule validation, working in-subagent model switches, session-selection echo after save) |
 | v0.4.0 | Message scroll nav: chat.deepseek.com-style user-message ticks (hover to preview, click to jump) with customizable colors |
 | v0.4.1 | Adapted to the official 0.1.2-alpha.1 built-in turn navigator: the scroll nav is now off by default; enabling it hides the official navigator globally (every conversation, live toggle) and toggling off restores it everywhere; jumps use the official instant-write semantics, retiring the 5-second heartbeat guard |
-| v0.5.0 | Interval heartbeat + scheduled tasks (OpenClaw-style scheduling): an interval heartbeat and daily/weekly/monthly fixed-time tasks with fully independent prompts and targets; targets are the main workspace root (internal patrol, capped at 5, cold-fallback wakes the newest session) or any specific session (cold-resumed through the official sessionController, then injected); the scheduler runs in the dsh backend process, no browser needed; with a run log and run-once-now |
+| v0.5.0 | Scheduled tasks (multi-task, OpenClaw-style): one task page holds any number of tasks (each with its own name, switch, prompt, and target — an interval heartbeat or a daily/weekly/monthly fixed time), appended via a New-task button; targets are the main workspace root (internal patrol, capped at 5, cold-fallback wakes the newest session) or any specific session (shown by conversation title by default, cold-resumed through the official sessionController, then injected); all dropdowns and the time picker use the native dsh Menu style; the scheduler runs in the dsh backend process, no browser needed; with a run log and run-once-now |
 
 ## Feedback
 
