@@ -32,9 +32,21 @@ console.log("compareVersions table OK:", cmpCases.length, "cases");
 
 const routes = new Map();
 const warnings = [];
-const domainState = { initialized: true, workspaceIds: ["w1"], archivedSessionIds: ["s-archived", "s-gone", "s-orphan"] };
+const emittedEvents = [];
+const domainState = { initialized: true, workspaceIds: ["w1"], archivedSessionIds: ["s-archived", "s-gone", "s-orphan", "s-idle", "s-running", "s-live"] };
 const records = new Map([["w1", { path: "C:/proj", title: "proj", sessionIds: ["s-archived", "s-other"], createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" }]]);
 let restarts = 0;
+// In-place mirror-sync seams: the fake registry mimics the real
+// WorkspaceRegistry shape (setState stores the served snapshot; entities Map
+// holds one object per record whose `record` property is its served snapshot).
+const registryMirror = { state: null };
+const fakeEntities = new Map([["w1", { record: records.get("w1") }]]);
+const fakeRegistry = {
+	// scheduler targets read this list(); the in-place sync reads setState/entities.
+	list: () => [{ id: "w1", path: "C:/proj", title: "proj", sessionIds: ["session-ws1-a", "session-ws1-b", "session-cold"] }],
+	setState(next) { registryMirror.state = next; },
+	entities: fakeEntities,
+};
 
 // ── model-routing stub services ──────────────────────────────────────────────
 const eventHandlers = new Map();
@@ -80,6 +92,25 @@ function makeFakeAgent(id, cwd) {
 for (const id of ["session-ws1-a", "session-ws1-b"]) liveAgents.set(id, makeFakeAgent(id, "C:/proj"));
 coldAgents.set("session-cold", makeFakeAgent("session-cold", "C:/proj"));
 coldAgents.set("session-cold2", makeFakeAgent("session-cold2", "D:/elsewhere"));
+
+// ── archive-delete stub services ─────────────────────────────────────────────
+// Attached-session kinds the delete path must distinguish: s-live is attached
+// with NO resolvable agent (un-detachable → refused), s-idle is attached with
+// a disposable agent fiber, s-running is attached with a RUNNING agent.
+const attachedSessions = new Map();
+const agentBySession = new Map();
+function makeAttached(id, { running = false, withAgent = true } = {}) {
+	attachedSessions.set(id, { id });
+	if (!withAgent) return;
+	agentBySession.set(id, {
+		id,
+		status: running ? "running" : "idle",
+		ctx: { fiber: { dispose: async () => { attachedSessions.delete(id); } } },
+	});
+}
+makeAttached("s-live", { withAgent: false });
+makeAttached("s-idle");
+makeAttached("s-running", { running: true });
 
 // Real host builds for the router's runtime seams; skipped gracefully when
 // this checkout is not present (the ready-path tests then report and stop).
@@ -161,8 +192,10 @@ mod.testHooks.seedAppModule("@deepseek-ai/dsh-llm", {
 const dir = await mkdtemp(join(tmpdir(), "dsh-better-test-"));
 const artifact = join(dir, "session-s-archived.jsonl");
 const artifactGone = join(dir, "session-s-gone.jsonl");
+const artifactIdle = join(dir, "session-s-idle.jsonl");
 await writeFile(artifact, '{"seq":0}\n', "utf8");
 await writeFile(artifactGone, '{"seq":0}\n', "utf8");
+await writeFile(artifactIdle, '{"seq":0}\n', "utf8");
 
 // Deterministic checkout discovery: a fake source tree + env override, armed
 // BEFORE any route fires (install discovery memoizes on first use).
@@ -175,7 +208,9 @@ process.env.DSH_BETTER_REPO_ROOT = checkoutDir;
 const ctx = {
   effect: (body, label) => { body(); return () => {}; },
   logger: { warn: (m) => warnings.push(m) },
+  emit(event, ...args) { emittedEvents.push([event, ...args]); },
   loader: { entries: () => [{ id: "workspace", options: { name: "@deepseek-ai/dsh-workspace" }, fiber: { restart: async () => { restarts += 1; } } }] },
+  get(service) { if (service === "workspaceRegistry") return fakeRegistry; return undefined; },
   storageDomain: { get: (n) => n === "workspace" ? {
     global: { get: () => domainState, set: async (v) => { Object.assign(domainState, v); } },
     table: (t) => ({
@@ -191,13 +226,17 @@ const ctx = {
   },
   settings: makeMemorySettings(zReal),
   get(service) {
-    if (service === "sessions") return { get: (id) => id === "s-live" ? { id } : undefined };
+    if (service === "sessions") {
+      return {
+        get: (id) => attachedSessions.get(String(id)) ?? (id === "s-live" ? { id } : undefined),
+      };
+    }
     if (service === "llm") return llmStub;
     if (service === "agents") return {
       list: () => [fakeAgent],
       get: (id) => {
         if (String(id) === "session-main") return fakeAgent;
-        return liveAgents.get(String(id)) ?? coldAgents.get(String(id));
+        return agentBySession.get(String(id)) ?? liveAgents.get(String(id)) ?? coldAgents.get(String(id));
       },
       roots: () => [...liveAgents.values(), ...coldAgents.values()],
     };
@@ -212,16 +251,15 @@ const ctx = {
       };
     }
     if (service === "workspaceRegistry") {
-      return {
-        list: () => [{ id: "w1", path: "C:/proj", title: "proj", sessionIds: ["session-ws1-a", "session-ws1-b", "session-cold"] }],
-      };
+      return fakeRegistry;
     }
     if (service === "tools") return { register: (def) => { registeredTools.push(def); return () => {}; } };
     if (service === "agentDefaultModel") return { currentSelection: () => ({ provider: "deepseek-official", model: "deepseek-v4-flash" }) };
     if (service === "sessionPersistence") return {
       supportsRawArtifacts: true,
       locate: (header) => header.id === "s-archived" ? { kind: "jsonl", path: artifact }
-        : header.id === "s-gone" ? { kind: "jsonl", path: artifactGone } : undefined,
+        : header.id === "s-gone" ? { kind: "jsonl", path: artifactGone }
+        : header.id === "s-idle" ? { kind: "jsonl", path: artifactIdle } : undefined,
       list: async () => [
         { id: "session-ws1-a", cwd: "C:/proj", createdAt: Date.parse("2026-02-03T04:05:06Z") },
         { id: "session-ws1-b", cwd: "C:/proj", createdAt: Date.parse("2026-02-01T04:05:06Z") },
@@ -229,6 +267,7 @@ const ctx = {
         { id: "session-cold2", cwd: "D:/elsewhere", createdAt: Date.parse("2026-01-02T04:05:06Z") },
         { id: "s-archived", cwd: "C:/proj", createdAt: Date.parse("2026-02-03T04:05:06Z") },
         { id: "s-gone", cwd: "C:/proj", createdAt: Date.parse("2026-01-03T04:05:06Z") },
+        { id: "s-idle", cwd: "C:/proj", createdAt: Date.parse("2026-01-02T04:05:06Z") },
       ],
     };
     return undefined;
@@ -276,7 +315,7 @@ function makeRes() {
   await new Promise((r) => setTimeout(r, 30));
   assert.equal(res.statusCode, 200);
   const body = JSON.parse(res.body);
-  assert.equal(body.items.length, 3);
+  assert.equal(body.items.length, 6);
   assert.equal(body.items[0].artifact.kind, "jsonl");
   console.log("list OK:", JSON.stringify(body.items[0]));
 }
@@ -286,16 +325,18 @@ await new Promise((r) => setTimeout(r, 10));
 {
   const req = okReq("POST"); let bodyText;
   req.on = (ev, cb) => { if (ev === "data") {} if (ev === "end") { bodyText = JSON.stringify({ sessionId: "s-archived" }); cb(); } };
-  const chunks = [Buffer.from(JSON.stringify({ sessionId: "s-archived" }))]; 
+  const chunks = [Buffer.from(JSON.stringify({ sessionId: "s-archived" }))];
   req.on = (ev, cb) => { if (ev === "data") cb(chunks[0]); if (ev === "end") cb(); };
   const res = makeRes();
   routes.get(mod.RESTORE_PATH)(req, res);
   await new Promise((r) => setTimeout(r, 30));
   assert.equal(res.statusCode, 200, res.body);
-  assert.deepEqual(JSON.parse(res.body), { ok: true, restarted: true });
-  assert.equal(restarts, 1);
-  assert.deepEqual(domainState.archivedSessionIds, ["s-gone", "s-orphan"]);
-  console.log("restore OK; archive set:", domainState.archivedSessionIds.join(","));
+  assert.deepEqual(JSON.parse(res.body), { ok: true, refreshed: "in-place" });
+  assert.equal(restarts, 0, "in-place sync must not restart the registry entry");
+  assert.deepEqual(domainState.archivedSessionIds, ["s-gone", "s-orphan", "s-idle", "s-running", "s-live"]);
+  assert.equal(registryMirror.state.archivedSessionIds.join(","), "s-gone,s-orphan,s-idle,s-running,s-live", "registry mirror re-synced");
+  assert.equal(fakeEntities.get("w1").record, records.get("w1"), "entity record snapshot swapped to the domain record");
+  console.log("restore OK (in-place); archive set:", domainState.archivedSessionIds.join(","));
 }
 
 // delete
@@ -308,7 +349,10 @@ await new Promise((r) => setTimeout(r, 10));
   await new Promise((r) => setTimeout(r, 30));
   assert.equal(res.statusCode, 200, res.body);
   assert.equal(records.get("w1").sessionIds.includes("s-gone"), false);
-  assert.deepEqual(domainState.archivedSessionIds, ["s-orphan"]);
+  assert.deepEqual(domainState.archivedSessionIds, ["s-orphan", "s-idle", "s-running", "s-live"]);
+  assert.equal(JSON.parse(res.body).refreshed, "in-place", "delete also syncs in place");
+  assert.equal(registryMirror.state.archivedSessionIds.join(","), "s-orphan,s-idle,s-running,s-live");
+  assert.equal(fakeEntities.get("w1").record.sessionIds.includes("s-gone"), false, "entity mirror dropped the deleted id");
   let exists = true;
   try { await readFile(artifactGone); } catch { exists = false; }
   assert.equal(exists, false, "artifact should be unlinked");
@@ -317,9 +361,11 @@ await new Promise((r) => setTimeout(r, 10));
   console.log("delete OK; workspace record:", JSON.stringify(records.get("w1").sessionIds), "; restarts:", restarts);
 }
 
-
-// orphan delete (archive set names it, persistence does not)
+// fallback restart: a registry whose shape the in-place sync does not
+// recognize (no setState) must degrade to the counted loader-entry restart.
 {
+  fakeRegistry.setState = undefined;
+  fakeRegistry.entities = undefined;
   const chunks = [Buffer.from(JSON.stringify({ sessionId: "s-orphan" }))];
   const req = okReq("POST");
   req.on = (ev, cb) => { if (ev === "data") cb(chunks[0]); if (ev === "end") cb(); };
@@ -327,22 +373,75 @@ await new Promise((r) => setTimeout(r, 10));
   routes.get(mod.DELETE_PATH)(req, res);
   await new Promise((r) => setTimeout(r, 30));
   assert.equal(res.statusCode, 200, res.body);
-  const body = JSON.parse(res.body);
-  assert.equal(body.removedArtifact, false);
+  assert.equal(JSON.parse(res.body).refreshed, "restart", "unrecognized shape falls back to the restart");
+  assert.equal(restarts, 1, "fallback restart happened exactly once");
   assert.equal(domainState.archivedSessionIds.includes("s-orphan"), false);
-  console.log("orphan delete OK; archive set:", domainState.archivedSessionIds.join(","));
+  fakeRegistry.setState = (next) => { registryMirror.state = next; };
+  fakeRegistry.entities = fakeEntities;
+  console.log("fallback restart OK");
 }
 
-// live-session refusal
+// archive delete × attached-session matrix:
+// (a) attached with no agent → refused 409 (cannot detach)
+// (b) attached idle → detached via fiber.dispose, artifact unlinked, removed broadcast
+// (c) attached RUNNING → refused 409, nothing written
+// (d) cold → plain delete + removed broadcast
 {
-  const chunks = [Buffer.from(JSON.stringify({ sessionId: "s-live" }))];
-  const req = okReq("POST");
-  req.on = (ev, cb) => { if (ev === "data") cb(chunks[0]); if (ev === "end") cb(); };
-  const res = makeRes();
-  routes.get(mod.DELETE_PATH)(req, res);
-  await new Promise((r) => setTimeout(r, 30));
-  assert.equal(res.statusCode, 409);
-  console.log("live refusal OK:", JSON.parse(res.body).error);
+	const postDelete = async (sessionId) => {
+		const req = okReq("POST");
+		req.on = (ev, cb) => { if (ev === "data") cb(Buffer.from(JSON.stringify({ sessionId }))); if (ev === "end") cb(); };
+		const res = makeRes();
+		routes.get(mod.DELETE_PATH)(req, res);
+		await new Promise((r) => setTimeout(r, 40));
+		return { status: res.statusCode, body: JSON.parse(res.body) };
+	};
+	const emitted = (name) => emittedEvents.filter((row) => row[0] === name).length;
+
+	// (a) attached, un-detachable → 409, durable state untouched
+	{
+		const out = await postDelete("s-live");
+		assert.equal(out.status, 409);
+		assert.equal(out.body.error, "session-live");
+		assert.ok(domainState.archivedSessionIds.includes("s-live"), "refused delete must not touch the archive set");
+		assert.ok(attachedSessions.has("s-live"), "refused delete must not detach");
+	}
+
+	// (b) attached idle → detach + delete + broadcast
+	{
+		const out = await postDelete("s-idle");
+		assert.equal(out.status, 200, JSON.stringify(out.body));
+		assert.equal(out.body.detached, true, "idle session detached through its fiber");
+		assert.equal(attachedSessions.has("s-idle"), false, "idle session left the store");
+		assert.deepEqual(domainState.archivedSessionIds.filter((v) => String(v) === "s-idle"), [], "archive set dropped the id");
+		let exists = true;
+		try { await readFile(artifactIdle); } catch { exists = false; }
+		assert.equal(exists, false, "idle artifact unlinked after detach");
+	}
+	assert.equal(emittedEvents.some((row) => row[0] === "api-session/removed" && row[1] === "s-idle"), true, "removed broadcast for the detached id");
+
+	// (c) attached running → 409 refusal
+	{
+		const beforeEmits = emitted("api-session/removed");
+		const out = await postDelete("s-running");
+		assert.equal(out.status, 409);
+		assert.equal(out.body.error, "session-live");
+		assert.ok(attachedSessions.has("s-running"), "running session must stay attached");
+		assert.ok(domainState.archivedSessionIds.includes("s-running"), "running refusal must not touch the archive set");
+		assert.equal(emitted("api-session/removed"), beforeEmits, "refusal must not broadcast");
+	}
+
+	// (d) cold archived id → delete + broadcast (extends the earlier cold delete)
+	{
+		const beforeEmits = emitted("api-session/removed");
+		domainState.archivedSessionIds = [...domainState.archivedSessionIds, "s-coldarch"];
+		const out = await postDelete("s-coldarch");
+		assert.equal(out.status, 200, JSON.stringify(out.body));
+		assert.equal(out.body.detached, false, "cold delete needs no detach");
+		assert.ok(!domainState.archivedSessionIds.includes("s-coldarch"), "cold id dropped");
+		assert.equal(emitted("api-session/removed"), beforeEmits + 1, "exactly one removed broadcast");
+		assert.equal(emittedEvents.at(-1)[1], "s-coldarch", "broadcast carries the deleted id");
+	}
+	console.log("archive delete × attached-session matrix OK (refuse/detach/running/cold)");
 }
 
 // update-check across three stubbed-source scenarios + cache behavior
