@@ -256,18 +256,20 @@ const ctx = {
     if (service === "tools") return { register: (def) => { registeredTools.push(def); return () => {}; } };
     if (service === "agentDefaultModel") return { currentSelection: () => ({ provider: "deepseek-official", model: "deepseek-v4-flash" }) };
     if (service === "sessionPersistence") return {
-      supportsRawArtifacts: true,
+      // Deployed post-seam shape: snapshot records ({ header, revision,
+      // sizeBytes }), no `supportsRawArtifacts`, `locate` as a runtime-only
+      // backend hook. One raw-header row pins pre-seam build tolerance.
       locate: (header) => header.id === "s-archived" ? { kind: "jsonl", path: artifact }
         : header.id === "s-gone" ? { kind: "jsonl", path: artifactGone }
         : header.id === "s-idle" ? { kind: "jsonl", path: artifactIdle } : undefined,
       list: async () => [
-        { id: "session-ws1-a", cwd: "C:/proj", createdAt: Date.parse("2026-02-03T04:05:06Z") },
-        { id: "session-ws1-b", cwd: "C:/proj", createdAt: Date.parse("2026-02-01T04:05:06Z") },
-        { id: "session-cold", cwd: "C:/proj", createdAt: Date.parse("2026-01-03T04:05:06Z") },
+        { header: { id: "session-ws1-a", cwd: "C:/proj", createdAt: Date.parse("2026-02-03T04:05:06Z") }, revision: "r1", sizeBytes: 128 },
+        { header: { id: "session-ws1-b", cwd: "C:/proj", createdAt: Date.parse("2026-02-01T04:05:06Z") }, revision: "r1", sizeBytes: 128 },
+        { header: { id: "session-cold", cwd: "C:/proj", createdAt: Date.parse("2026-01-03T04:05:06Z") }, revision: "r1", sizeBytes: 128 },
         { id: "session-cold2", cwd: "D:/elsewhere", createdAt: Date.parse("2026-01-02T04:05:06Z") },
-        { id: "s-archived", cwd: "C:/proj", createdAt: Date.parse("2026-02-03T04:05:06Z") },
-        { id: "s-gone", cwd: "C:/proj", createdAt: Date.parse("2026-01-03T04:05:06Z") },
-        { id: "s-idle", cwd: "C:/proj", createdAt: Date.parse("2026-01-02T04:05:06Z") },
+        { header: { id: "s-archived", cwd: "C:/proj", createdAt: Date.parse("2026-02-03T04:05:06Z") }, revision: "r1", sizeBytes: 128 },
+        { header: { id: "s-gone", cwd: "C:/proj", createdAt: Date.parse("2026-01-03T04:05:06Z") }, revision: "r1", sizeBytes: 128 },
+        { header: { id: "s-idle", cwd: "C:/proj", createdAt: Date.parse("2026-01-02T04:05:06Z") }, revision: "r1", sizeBytes: 128 },
       ],
     };
     return undefined;
@@ -317,6 +319,12 @@ function makeRes() {
   const body = JSON.parse(res.body);
   assert.equal(body.items.length, 6);
   assert.equal(body.items[0].artifact.kind, "jsonl");
+  // Regression (2026-09 harness seam update): snapshot-shaped list() rows must
+  // still resolve to headerFound:true; an id absent from persistence stays
+  // headerFound:false (orphan) instead of everything collapsing to orphan.
+  assert.equal(body.items[0].headerFound, true, "snapshot row resolves to a header");
+  assert.equal(body.items[0].cwd, "C:/proj");
+  assert.equal(body.items[2].headerFound, false, "id missing from persistence stays orphan");
   console.log("list OK:", JSON.stringify(body.items[0]));
 }
 await new Promise((r) => setTimeout(r, 10));
