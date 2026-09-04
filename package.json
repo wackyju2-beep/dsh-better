@@ -1,7 +1,7 @@
 {
   "name": "dsh-better",
   "description": "Better DSH: archived-session management, task-stop desktop notifications, an update checker, model routing (keyword rules + allowlist-gated model_route), multi-task scheduled triggers (interval heartbeats & fixed-time tasks), and a DeepSeek-style message scroll nav for the dsh web GUI",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "keywords": [
     "deepseek",
     "deepseek-harness",
@@ -38,6 +38,9 @@
     }
   },
   "license": "MIT",
+  "engines": {
+    "dsh": ">=0.1.2-alpha.3"
+  },
   "publishConfig": {
     "registry": "https://registry.npmjs.org/"
   }
